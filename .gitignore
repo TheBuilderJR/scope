@@ -1,0 +1,17 @@
+# Rust / Cargo
+/src-tauri/target/
+**/*.rs.bk
+
+# Tauri generated
+/src-tauri/gen/schemas/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log

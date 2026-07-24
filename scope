@@ -1,0 +1,49 @@
+#!/bin/sh
+# Scope CLI launcher.
+#
+# Usage:  scope [folder]
+#
+# Opens the given folder (default: current directory) in the Scope GUI.
+# If Scope is already running, the folder is forwarded to the existing window
+# (via the single-instance plugin) instead of launching a second copy.
+
+set -eu
+
+target="${1:-$PWD}"
+
+# Resolve to an absolute path when it exists as a directory.
+if [ -d "$target" ]; then
+  abs=$(cd "$target" && pwd)
+else
+  abs="$target"
+fi
+
+# Locate the Scope binary. Honour SCOPE_BIN, then check the usual install
+# locations, then fall back to a local dev build.
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+candidates="
+${SCOPE_BIN:-}
+/Applications/Scope.app/Contents/MacOS/scope
+$HOME/Applications/Scope.app/Contents/MacOS/scope
+$SELF_DIR/src-tauri/target/release/bundle/macos/Scope.app/Contents/MacOS/scope
+$SELF_DIR/src-tauri/target/release/scope
+$SELF_DIR/src-tauri/target/debug/scope
+"
+
+bin=""
+for c in $candidates; do
+  [ -n "$c" ] || continue
+  if [ -x "$c" ]; then
+    bin="$c"
+    break
+  fi
+done
+
+if [ -z "$bin" ]; then
+  echo "scope: could not find the Scope app." >&2
+  echo "Build it with 'cargo tauri build' or set SCOPE_BIN=/path/to/scope" >&2
+  exit 1
+fi
+
+# Run detached so the terminal returns immediately.
+"$bin" "$abs" >/dev/null 2>&1 &
