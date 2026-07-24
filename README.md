@@ -24,7 +24,7 @@ A clean, native-feeling **light theme** styled after macOS Finder.
 - Clickable breadcrumb path, plus Back / Forward / Up / Home navigation.
 - Live name filter; toggle hidden files with the Finder hotkey **⌘⇧.**.
 - Double-click folders to open, files to launch in their default app.
-- **Reveal in Finder** for any selection.
+- **Open** / **Reveal in Finder** actions in the preview pane.
 
 ### 📊 Monitor (htop-like, all in one view)
 - Live **time-series graphs** for CPU, memory, and network throughput

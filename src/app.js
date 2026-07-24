@@ -595,9 +595,6 @@ document.getElementById("nav-up").addEventListener("click", () => {
   navigate(parent);
 });
 document.getElementById("nav-home").addEventListener("click", () => navigate(HOME));
-document.getElementById("reveal-btn").addEventListener("click", () => {
-  invoke("reveal_in_finder", { path: selectedPath || currentDir });
-});
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
 
 // Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
