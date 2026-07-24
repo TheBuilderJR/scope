@@ -286,6 +286,108 @@ fn stat_path(path: String) -> Result<PathInfo, String> {
     })
 }
 
+/// Stable, filesystem-safe cache key for a thumbnail: FNV-1a over the path,
+/// modification time and requested size, so edits invalidate the cache.
+fn thumb_key(path: &str, mtime: i64, size: u32) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
+    mix(path.as_bytes());
+    mix(&mtime.to_le_bytes());
+    mix(&size.to_le_bytes());
+    format!("{:016x}", h)
+}
+
+/// Generate (or return a cached) QuickLook thumbnail for a file, exactly like
+/// Finder does — image content, PDF first pages, video frames, doc icons, etc.
+/// Returns the absolute path to a PNG, or None if no thumbnail is available.
+#[tauri::command]
+async fn thumbnail(
+    app: tauri::AppHandle,
+    path: String,
+    size: u32,
+) -> Result<Option<String>, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, path, size);
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        if meta.is_dir() {
+            return Ok(None);
+        }
+        let size = size.clamp(16, 512);
+        let mtime = systime_secs(meta.modified()).unwrap_or(0);
+        let key = thumb_key(&path, mtime, size);
+
+        let cache_dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| e.to_string())?
+            .join("thumbnails");
+        std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+        let out = cache_dir.join(format!("{key}.png"));
+        if out.exists() {
+            return Ok(Some(out.to_string_lossy().to_string()));
+        }
+
+        // qlmanage writes "<basename>.png" into the output dir; give each
+        // request its own scratch dir to avoid basename collisions.
+        let scratch = cache_dir.join(format!("tmp-{key}"));
+        std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+
+        let gen = tauri::async_runtime::spawn_blocking({
+            let path = path.clone();
+            let scratch = scratch.clone();
+            move || {
+                std::process::Command::new("qlmanage")
+                    .args([
+                        "-t",
+                        "-s",
+                        &size.to_string(),
+                        "-o",
+                        &scratch.to_string_lossy(),
+                        &path,
+                    ])
+                    .output()
+                    .ok()
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let _ = gen;
+
+        // Find whatever qlmanage produced (it appends ".png" to the filename).
+        let produced = std::fs::read_dir(&scratch)
+            .ok()
+            .and_then(|rd| rd.flatten().map(|e| e.path()).find(|p| p.is_file()));
+
+        let result = match produced {
+            Some(p) => {
+                let _ = std::fs::rename(&p, &out);
+                if out.exists() {
+                    Some(out.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let _ = std::fs::remove_dir_all(&scratch);
+        Ok(result)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // System monitor
 // ---------------------------------------------------------------------------
@@ -521,6 +623,7 @@ pub fn run() {
             initial_path,
             read_text_preview,
             stat_path,
+            thumbnail,
             system_snapshot,
             process_list,
             kill_process,

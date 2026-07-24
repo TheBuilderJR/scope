@@ -14,12 +14,15 @@ A clean, native-feeling **light theme** styled after macOS Finder.
 ### 🔍 Finder
 - **List view** with sortable columns (Name · Size · Kind · Date) and a
   macOS-style **column (Miller) view** for drilling through folders.
+- Real **QuickLook thumbnails** rendered inline (image content, PDF first
+  pages, video frames, app icons…), generated lazily and cached on disk.
 - A **preview / info pane** with live previews of images, video, audio, PDFs,
   and text/source files, plus full metadata (size, kind, created / modified /
   accessed dates, permissions, path).
-- Sidebar of favorites (Home, Desktop, Documents, Downloads, Applications, Root).
+- Sidebar of favorites with custom icons (Home, Desktop, Documents, Downloads,
+  Applications, Root).
 - Clickable breadcrumb path, plus Back / Forward / Up / Home navigation.
-- Live name filter and a toggle for hidden files.
+- Live name filter; toggle hidden files with the Finder hotkey **⌘⇧.**.
 - Double-click folders to open, files to launch in their default app.
 - **Reveal in Finder** for any selection.
 

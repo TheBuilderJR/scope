@@ -98,6 +98,104 @@ function escapeHtml(s) {
 }
 
 // ---------------------------------------------------------------------------
+// Inline SVG icons (Feather-style strokes, inherit currentColor)
+// ---------------------------------------------------------------------------
+
+const ICONS = {
+  home: '<path d="M3 9.5 12 3l9 6.5"/><path d="M5 8.8V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8.8"/><path d="M9.5 21v-6h5v6"/>',
+  desktop:
+    '<rect x="2.5" y="3.5" width="19" height="13" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/>',
+  documents:
+    '<path d="M13.5 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8.5z"/><path d="M13.5 2.5v6h6"/><path d="M8.5 13h7"/><path d="M8.5 16.5h7"/>',
+  downloads:
+    '<path d="M20.5 15v4a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19v-4"/><path d="M7.5 10.5 12 15l4.5-4.5"/><path d="M12 15V3"/>',
+  applications:
+    '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+  drive:
+    '<path d="M2.5 12 5.4 5.5A2 2 0 0 1 7.2 4.3h9.6a2 2 0 0 1 1.8 1.2L21.5 12v6a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"/><path d="M2.5 12h19"/><path d="M6.5 16h.01"/><path d="M10 16h.01"/>',
+  back: '<path d="M15 18.5 8.5 12 15 5.5"/>',
+  forward: '<path d="M9 5.5 15.5 12 9 18.5"/>',
+  up: '<path d="M12 20V5"/><path d="M5.5 11 12 4.5 18.5 11"/>',
+  list: '<path d="M8 6.5h12"/><path d="M8 12h12"/><path d="M8 17.5h12"/><circle cx="4" cy="6.5" r="1.1"/><circle cx="4" cy="12" r="1.1"/><circle cx="4" cy="17.5" r="1.1"/>',
+  columns:
+    '<rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M9 4v16"/><path d="M15 4v16"/>',
+};
+
+function svg(name, cls = "icon-svg") {
+  return `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+}
+
+// ---------------------------------------------------------------------------
+// Lazy QuickLook thumbnails (like Finder), disk-cached in the backend
+// ---------------------------------------------------------------------------
+
+const thumbCache = new Map(); // path -> asset URL | null (null = no thumbnail)
+const thumbWaiting = [];
+let thumbActive = 0;
+const THUMB_MAX = 6;
+
+const thumbObserver = new IntersectionObserver(
+  (entries) => {
+    for (const ent of entries) {
+      if (ent.isIntersecting) {
+        const el = ent.target;
+        thumbObserver.unobserve(el);
+        queueThumb(el, el.dataset.thumbPath, 64);
+      }
+    }
+  },
+  { rootMargin: "300px" }
+);
+
+function thumbEligible(entry) {
+  // Files, plus .app bundles (QuickLook renders their app icon).
+  return !entry.is_dir || entry.kind === "Application";
+}
+
+// Attach a thumbnail to an icon slot: cached -> apply now, else observe lazily.
+function attachThumb(icoEl, entry) {
+  if (!thumbEligible(entry)) return;
+  const cached = thumbCache.get(entry.path);
+  if (cached) {
+    icoEl.innerHTML = `<img class="thumb" src="${cached}" alt="">`;
+  } else if (cached === undefined) {
+    icoEl.dataset.thumbPath = entry.path;
+    thumbObserver.observe(icoEl);
+  }
+}
+
+function queueThumb(el, path, size) {
+  if (!path) return;
+  if (thumbCache.has(path)) {
+    const url = thumbCache.get(path);
+    if (url && el.isConnected) el.innerHTML = `<img class="thumb" src="${url}" alt="">`;
+    return;
+  }
+  thumbWaiting.push({ el, path, size });
+  pumpThumbs();
+}
+
+function pumpThumbs() {
+  while (thumbActive < THUMB_MAX && thumbWaiting.length) {
+    const job = thumbWaiting.shift();
+    thumbActive++;
+    invoke("thumbnail", { path: job.path, size: job.size })
+      .then((res) => {
+        const url = res ? convertFileSrc(res) : null;
+        thumbCache.set(job.path, url);
+        if (url && job.el.isConnected && job.el.dataset.thumbPath === job.path) {
+          job.el.innerHTML = `<img class="thumb" src="${url}" alt="">`;
+        }
+      })
+      .catch(() => thumbCache.set(job.path, null))
+      .finally(() => {
+        thumbActive--;
+        pumpThumbs();
+      });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // View switching
 // ---------------------------------------------------------------------------
 
@@ -128,12 +226,12 @@ const favoritesEl = document.getElementById("favorites");
 const finderStatus = document.getElementById("finder-status");
 const finderEmpty = document.getElementById("finder-empty");
 const finderSearch = document.getElementById("finder-search");
-const showHidden = document.getElementById("show-hidden");
 const listViewEl = document.getElementById("list-view");
 const columnViewEl = document.getElementById("column-view");
 const previewEl = document.getElementById("preview");
 
 let viewMode = "list"; // "list" | "columns"
+let hiddenShown = false; // toggled with ⌘⇧. like Finder
 let currentDir = null;
 let currentEntries = [];
 let selectedPath = null;
@@ -154,18 +252,18 @@ async function initFinder() {
 
 function buildFavorites() {
   const favs = [
-    { name: "Home", path: HOME, ico: "⌂" },
-    { name: "Desktop", path: `${HOME}/Desktop`, ico: "🖥" },
-    { name: "Documents", path: `${HOME}/Documents`, ico: "📄" },
-    { name: "Downloads", path: `${HOME}/Downloads`, ico: "⬇" },
-    { name: "Applications", path: "/Applications", ico: "🅰" },
-    { name: "Root", path: "/", ico: "💾" },
+    { name: "Home", path: HOME, ico: "home" },
+    { name: "Desktop", path: `${HOME}/Desktop`, ico: "desktop" },
+    { name: "Documents", path: `${HOME}/Documents`, ico: "documents" },
+    { name: "Downloads", path: `${HOME}/Downloads`, ico: "downloads" },
+    { name: "Applications", path: "/Applications", ico: "applications" },
+    { name: "Root", path: "/", ico: "drive" },
   ];
   favoritesEl.innerHTML = "";
   favs.forEach((f) => {
     const li = document.createElement("li");
     li.dataset.path = f.path;
-    li.innerHTML = `<span class="ico">${f.ico}</span><span>${f.name}</span>`;
+    li.innerHTML = `<span class="ico">${svg(f.ico)}</span><span>${f.name}</span>`;
     li.addEventListener("click", () => navigate(f.path));
     favoritesEl.appendChild(li);
   });
@@ -242,7 +340,7 @@ function renderBreadcrumb(fullPath) {
 function filterEntries(entries) {
   const q = finderSearch.value.trim().toLowerCase();
   return entries.filter((e) => {
-    if (!showHidden.checked && e.hidden) return false;
+    if (!hiddenShown && e.hidden) return false;
     if (q && !e.name.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -276,6 +374,7 @@ function sortedFiltered() {
 
 function renderFiles() {
   const list = sortedFiltered();
+  thumbObserver.disconnect();
   fileRows.innerHTML = "";
   finderEmpty.classList.toggle("hidden", list.length > 0);
 
@@ -296,6 +395,7 @@ function renderFiles() {
     });
     tr.addEventListener("dblclick", () => openEntry(e));
     if (e.path === selectedPath) tr.classList.add("selected");
+    attachThumb(tr.querySelector(".ico"), e);
     frag.appendChild(tr);
   }
   fileRows.appendChild(frag);
@@ -323,6 +423,7 @@ function openEntry(entry) {
 // ---- Column (Miller) view ----
 
 function renderColumns() {
+  thumbObserver.disconnect();
   columnViewEl.innerHTML = "";
   columns.forEach((col, idx) => {
     const colEl = document.createElement("div");
@@ -341,6 +442,7 @@ function renderColumns() {
       item.addEventListener("dblclick", () => {
         if (!(e.is_dir && e.kind !== "Application")) openEntry(e);
       });
+      attachThumb(item.querySelector(".ico"), e);
       colEl.appendChild(item);
     }
     columnViewEl.appendChild(colEl);
@@ -376,6 +478,19 @@ function clearPreview() {
   previewEl.innerHTML = '<div class="preview-empty">Select an item to preview</div>';
 }
 
+// A larger QuickLook thumbnail for the preview pane, falling back to an icon.
+async function bigThumb(entry) {
+  const cached = thumbCache.get(entry.path);
+  if (cached) return `<img class="pv-thumb" src="${cached}" alt="">`;
+  try {
+    const res = await invoke("thumbnail", { path: entry.path, size: 256 });
+    if (res) return `<img class="pv-thumb" src="${convertFileSrc(res)}" alt="">`;
+  } catch {
+    /* fall through */
+  }
+  return `<div class="pv-bigicon">${iconFor(entry)}</div>`;
+}
+
 async function showPreview(entry) {
   let info;
   try {
@@ -399,18 +514,19 @@ async function showPreview(entry) {
   } else if (!entry.is_dir && e === "pdf") {
     media = `<iframe class="pv-media" style="height:300px" src="${convertFileSrc(entry.path)}"></iframe>`;
   } else if (!entry.is_dir) {
-    // Try a text preview; fall back to a big icon.
+    // Try a text preview; fall back to a QuickLook thumbnail, then an icon.
     try {
       const tp = await invoke("read_text_preview", { path: entry.path });
       if (selectedPath !== entry.path) return;
       if (tp.is_text) {
         media = `<pre class="pv-text">${escapeHtml(tp.text)}${tp.truncated ? "\n…" : ""}</pre>`;
       } else {
-        media = `<div class="pv-bigicon">${iconFor(entry)}</div>`;
+        media = await bigThumb(entry);
       }
     } catch {
-      media = `<div class="pv-bigicon">${iconFor(entry)}</div>`;
+      media = await bigThumb(entry);
     }
+    if (selectedPath !== entry.path) return;
   } else {
     media = `<div class="pv-bigicon">${iconFor(entry)}</div>`;
   }
@@ -483,7 +599,24 @@ document.getElementById("reveal-btn").addEventListener("click", () => {
   invoke("reveal_in_finder", { path: selectedPath || currentDir });
 });
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
-showHidden.addEventListener("change", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
+
+// Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
+document.addEventListener("keydown", (ev) => {
+  if (ev.metaKey && ev.shiftKey && ev.code === "Period") {
+    ev.preventDefault();
+    hiddenShown = !hiddenShown;
+    if (viewMode === "columns") renderColumns();
+    else renderFiles();
+  }
+});
+
+// Swap the toolbar glyphs for crisp SVG icons.
+document.getElementById("nav-back").innerHTML = svg("back");
+document.getElementById("nav-forward").innerHTML = svg("forward");
+document.getElementById("nav-up").innerHTML = svg("up");
+document.getElementById("nav-home").innerHTML = svg("home");
+document.getElementById("view-list").innerHTML = svg("list");
+document.getElementById("view-columns").innerHTML = svg("columns");
 
 document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
   th.addEventListener("click", () => {
