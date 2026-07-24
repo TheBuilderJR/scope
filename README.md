@@ -9,15 +9,23 @@ web frontend).
 
 ## Features
 
+A clean, native-feeling **light theme** styled after macOS Finder.
+
 ### 🔍 Finder
-- Browse the filesystem with a familiar column list (Name · Size · Kind · Date).
+- **List view** with sortable columns (Name · Size · Kind · Date) and a
+  macOS-style **column (Miller) view** for drilling through folders.
+- A **preview / info pane** with live previews of images, video, audio, PDFs,
+  and text/source files, plus full metadata (size, kind, created / modified /
+  accessed dates, permissions, path).
 - Sidebar of favorites (Home, Desktop, Documents, Downloads, Applications, Root).
 - Clickable breadcrumb path, plus Back / Forward / Up / Home navigation.
-- Sort by any column, live name filter, and a toggle for hidden files.
+- Live name filter and a toggle for hidden files.
 - Double-click folders to open, files to launch in their default app.
 - **Reveal in Finder** for any selection.
 
 ### 📊 Monitor (htop-like, all in one view)
+- Live **time-series graphs** for CPU, memory, and network throughput
+  (rolling ~3-minute history).
 - Per-core **CPU** usage bars with color-coded load, plus overall usage,
   CPU model, and average clock.
 - **Memory** and **Swap** bars with used / total figures.

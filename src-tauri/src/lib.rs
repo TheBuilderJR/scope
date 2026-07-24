@@ -189,6 +189,103 @@ fn initial_path(state: tauri::State<AppState>) -> Option<String> {
     state.initial_path.lock().unwrap().clone()
 }
 
+#[derive(Serialize)]
+struct TextPreview {
+    is_text: bool,
+    text: String,
+    truncated: bool,
+}
+
+/// Read the start of a file for previewing. Returns up to `max_bytes` (default
+/// 256 KiB) of text if the content looks like UTF-8 text, otherwise flags it as
+/// binary so the UI can fall back to an info panel.
+#[tauri::command]
+fn read_text_preview(path: String) -> Result<TextPreview, String> {
+    use std::io::Read;
+    const CAP: usize = 256 * 1024;
+    let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; CAP];
+    let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(n);
+
+    // Binary if it contains a NUL byte in the sampled region.
+    let has_nul = buf.iter().any(|&b| b == 0);
+    let truncated = n == CAP;
+    match (has_nul, String::from_utf8(buf)) {
+        (false, Ok(text)) => Ok(TextPreview {
+            is_text: true,
+            text,
+            truncated,
+        }),
+        _ => Ok(TextPreview {
+            is_text: false,
+            text: String::new(),
+            truncated: false,
+        }),
+    }
+}
+
+#[derive(Serialize)]
+struct PathInfo {
+    name: String,
+    path: String,
+    is_dir: bool,
+    is_symlink: bool,
+    kind: String,
+    size: u64,
+    item_count: Option<usize>,
+    modified: Option<i64>,
+    created: Option<i64>,
+    accessed: Option<i64>,
+    mode: Option<u32>,
+}
+
+fn systime_secs(t: std::io::Result<std::time::SystemTime>) -> Option<i64> {
+    t.ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+}
+
+/// Detailed metadata for a single path, used to populate the preview/info panel.
+#[tauri::command]
+fn stat_path(path: String) -> Result<PathInfo, String> {
+    let p = PathBuf::from(&path);
+    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    let sym = std::fs::symlink_metadata(&p).ok();
+    let is_dir = meta.is_dir();
+
+    let item_count = if is_dir {
+        std::fs::read_dir(&p).ok().map(|rd| rd.count())
+    } else {
+        None
+    };
+
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(meta.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+
+    Ok(PathInfo {
+        name: p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone()),
+        kind: describe_kind(&p, is_dir),
+        is_dir,
+        is_symlink: sym.map(|m| m.file_type().is_symlink()).unwrap_or(false),
+        size: if is_dir { 0 } else { meta.len() },
+        item_count,
+        modified: systime_secs(meta.modified()),
+        created: systime_secs(meta.created()),
+        accessed: systime_secs(meta.accessed()),
+        mode,
+        path,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // System monitor
 // ---------------------------------------------------------------------------
@@ -422,6 +519,8 @@ pub fn run() {
             open_path,
             reveal_in_finder,
             initial_path,
+            read_text_preview,
+            stat_path,
             system_snapshot,
             process_list,
             kill_process,
