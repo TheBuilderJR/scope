@@ -37,6 +37,7 @@ struct Entry {
     hidden: bool,
     size: u64,
     modified: Option<i64>, // seconds since the unix epoch
+    created: Option<i64>,  // seconds since the unix epoch
     kind: String,
 }
 
@@ -131,6 +132,11 @@ fn list_dir(path: String) -> Result<DirListing, String> {
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
+        let created = follow_meta
+            .as_ref()
+            .and_then(|m| m.created().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
 
         entries.push(Entry {
             hidden: name.starts_with('.'),
@@ -141,6 +147,7 @@ fn list_dir(path: String) -> Result<DirListing, String> {
             is_symlink,
             size,
             modified,
+            created,
         });
     }
 

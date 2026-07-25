@@ -387,6 +387,71 @@ button:focus-visible {
 .col-date {
   width: 170px;
 }
+.col-created {
+  width: 170px;
+}
+/* Finder-style column show/hide: driven by classes on the list container. */
+.filelist.hide-size th.col-size,
+.filelist.hide-size td.size {
+  display: none;
+}
+.filelist.hide-kind th.col-kind,
+.filelist.hide-kind td.kind {
+  display: none;
+}
+.filelist.hide-modified th.col-date,
+.filelist.hide-modified td.date:not(.date-created) {
+  display: none;
+}
+.filelist.hide-created th.col-created,
+.filelist.hide-created td.date-created {
+  display: none;
+}
+/* When Date Created (the last column) is hidden, drop the now-trailing divider
+   on Date Modified so there's no stray line at the right edge. */
+.filelist.hide-created.hide-modified th.col-kind,
+.filelist.hide-created.hide-modified td.kind,
+.filelist.hide-created:not(.hide-modified) th.col-date,
+.filelist.hide-created:not(.hide-modified) td.date:not(.date-created) {
+  border-right: none;
+}
+/* Right-click column-header menu (View Options) */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  color: var(--text);
+  user-select: none;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.ctx-check {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+}
+.ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
 .filelist td {
   padding: 6px 10px;
   border-bottom: 1px solid var(--line-soft);

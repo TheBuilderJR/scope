@@ -239,6 +239,37 @@ let selectedPath = null;
 let selectedEntry = null;
 let sortKey = "name";
 let sortAsc = true;
+// Finder-style view options, persisted across launches.
+let foldersOnTop = loadPref("scope.foldersOnTop", false);
+let visibleCols = loadPref("scope.visibleCols", {
+  size: true,
+  kind: true,
+  modified: true,
+  created: false,
+});
+
+function loadPref(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    if (v == null) return fallback;
+    const parsed = JSON.parse(v);
+    // Merge object prefs so new keys pick up their defaults.
+    if (fallback && typeof fallback === "object" && typeof parsed === "object") {
+      return { ...fallback, ...parsed };
+    }
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function savePref(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore quota errors */
+  }
+}
 let columns = []; // [{ path, listing, selectedPath }]
 const history = [];
 let historyIndex = -1;
@@ -373,7 +404,9 @@ function sortedFiltered() {
   const list = filterEntries(currentEntries);
   const dir = sortAsc ? 1 : -1;
   list.sort((a, b) => {
-    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    // Only cluster folders above files when the option is enabled; otherwise
+    // it's a pure sort on the chosen key.
+    if (foldersOnTop && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
     let cmp = 0;
     switch (sortKey) {
       case "size":
@@ -385,9 +418,14 @@ function sortedFiltered() {
       case "modified":
         cmp = (a.modified || 0) - (b.modified || 0);
         break;
+      case "created":
+        cmp = (a.created || 0) - (b.created || 0);
+        break;
       default:
         cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
     }
+    // Stable tiebreaker by name so equal timestamps/sizes stay deterministic.
+    if (cmp === 0) cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
     return cmp * dir;
   });
   return list;
@@ -410,7 +448,8 @@ function renderFiles() {
     }</span></div></td>
       <td class="size">${e.is_dir ? "—" : fmtBytes(e.size)}</td>
       <td class="kind">${e.kind}</td>
-      <td class="date">${fmtDate(e.modified)}</td>`;
+      <td class="date">${fmtDate(e.modified)}</td>
+      <td class="date date-created">${fmtDate(e.created)}</td>`;
     tr.addEventListener("click", () => {
       selectRowList(tr, e);
     });
@@ -450,7 +489,7 @@ function renderColumns() {
     const colEl = document.createElement("div");
     colEl.className = "mcol";
     const list = filterEntries(col.listing.entries).sort((a, b) => {
-      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      if (foldersOnTop && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
       return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
     });
     for (const e of list) {
@@ -655,6 +694,82 @@ document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
     if (!sortAsc) th.classList.add("desc");
     renderFiles();
   });
+});
+
+// ---- Configurable columns + sort options (Finder-style View Options) ----
+
+function applyColumnVisibility() {
+  for (const col of ["size", "kind", "modified", "created"]) {
+    listViewEl.classList.toggle(`hide-${col}`, !visibleCols[col]);
+  }
+}
+applyColumnVisibility();
+
+// Right-click the list header for a menu to show/hide columns and toggle
+// whether folders are kept on top (mirrors Finder's column header menu).
+const HEADER_MENU = [
+  { type: "check", label: "Keep Folders on Top", get: () => foldersOnTop, toggle: () => (foldersOnTop = !foldersOnTop) },
+  { type: "sep" },
+  { type: "col", col: "size", label: "Size" },
+  { type: "col", col: "kind", label: "Kind" },
+  { type: "col", col: "modified", label: "Date Modified" },
+  { type: "col", col: "created", label: "Date Created" },
+];
+
+let openMenuEl = null;
+function closeHeaderMenu() {
+  if (openMenuEl) {
+    openMenuEl.remove();
+    openMenuEl = null;
+    document.removeEventListener("mousedown", onMenuOutside, true);
+  }
+}
+function onMenuOutside(e) {
+  if (openMenuEl && !openMenuEl.contains(e.target)) closeHeaderMenu();
+}
+
+function openHeaderMenu(x, y) {
+  closeHeaderMenu();
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  for (const item of HEADER_MENU) {
+    if (item.type === "sep") {
+      const sep = document.createElement("div");
+      sep.className = "ctx-sep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const on = item.type === "check" ? item.get() : visibleCols[item.col];
+    const row = document.createElement("div");
+    row.className = "ctx-item";
+    row.innerHTML = `<span class="ctx-check">${on ? "✓" : ""}</span><span>${item.label}</span>`;
+    row.addEventListener("click", () => {
+      if (item.type === "check") {
+        item.toggle();
+        savePref("scope.foldersOnTop", foldersOnTop);
+        renderFiles();
+        if (viewMode === "columns") renderColumns();
+      } else {
+        visibleCols[item.col] = !visibleCols[item.col];
+        savePref("scope.visibleCols", visibleCols);
+        applyColumnVisibility();
+      }
+      closeHeaderMenu();
+    });
+    menu.appendChild(row);
+  }
+  document.body.appendChild(menu);
+  // Keep the menu on-screen.
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 4)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 4)}px`;
+  openMenuEl = menu;
+  document.addEventListener("mousedown", onMenuOutside, true);
+}
+
+listViewEl.querySelector("thead").addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  openHeaderMenu(e.clientX, e.clientY);
 });
 
 // ===========================================================================
@@ -1005,7 +1120,9 @@ function makeColumnsResizable(table, storageKey) {
   const thead = table.querySelector("thead");
   if (!thead) return;
   const ths = Array.from(table.querySelectorAll("thead th"));
-  const participates = (th) => th && th.dataset.noresize !== "1";
+  // Skip non-resizable and currently-hidden columns (offsetParent is null when
+  // display:none), so dividers only appear between visible columns.
+  const participates = (th) => th && th.dataset.noresize !== "1" && th.offsetParent !== null;
 
   // Restore saved widths.
   let saved = {};
