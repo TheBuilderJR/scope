@@ -488,6 +488,9 @@ function openEntry(entry) {
 
 function renderColumns() {
   thumbObserver.disconnect();
+  // Preserve each existing column's vertical scroll so drilling into a folder
+  // doesn't jump the earlier columns back to the top (Finder keeps them put).
+  const prevScroll = Array.from(columnViewEl.children).map((c) => c.scrollTop);
   columnViewEl.innerHTML = "";
   columns.forEach((col, idx) => {
     const colEl = document.createElement("div");
@@ -513,6 +516,11 @@ function renderColumns() {
       colEl.appendChild(empty);
     }
     columnViewEl.appendChild(colEl);
+  });
+  // Restore prior vertical scroll positions for columns that persisted; any
+  // newly added column has no saved value and correctly starts at the top.
+  Array.from(columnViewEl.children).forEach((c, i) => {
+    if (prevScroll[i] != null) c.scrollTop = prevScroll[i];
   });
   // scroll to reveal the newest column
   columnViewEl.scrollLeft = columnViewEl.scrollWidth;
