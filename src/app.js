@@ -634,13 +634,11 @@ async function showPreview(entry) {
   if (!entry.is_dir && IMG.includes(e)) {
     media = `<img class="pv-thumb" src="${convertFileSrc(entry.path)}" alt="" />`;
   } else if (!entry.is_dir && VID.includes(e)) {
-    // Use the QuickLook frame as a poster so the pane always shows a preview —
-    // consistent with the list thumbnail, and a fallback for codecs the webview
-    // can't decode (mkv/avi) where the <video> would otherwise render blank.
-    const poster = await thumbUrl(entry);
+    // Always show the QuickLook frame rather than a <video> element: QuickLook
+    // decodes every codec, while the webview's <video> only plays some (mp4
+    // codecs vary, mkv/avi don't play at all), giving inconsistent previews.
+    media = await bigThumb(entry);
     if (selectedPath !== entry.path) return;
-    const posterAttr = poster ? ` poster="${poster}"` : "";
-    media = `<video class="pv-media" controls preload="metadata"${posterAttr} src="${convertFileSrc(entry.path)}"></video>`;
   } else if (!entry.is_dir && AUD.includes(e)) {
     media = `<audio class="pv-media" controls src="${convertFileSrc(entry.path)}"></audio>`;
   } else if (!entry.is_dir && e === "pdf") {
