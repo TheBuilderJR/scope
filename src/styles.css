@@ -373,7 +373,6 @@ button:focus-visible {
 }
 .col-size {
   width: 96px;
-  text-align: right;
 }
 .col-kind {
   width: 150px;
@@ -389,7 +388,6 @@ button:focus-visible {
   white-space: nowrap;
 }
 .filelist td.size {
-  text-align: right;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
@@ -896,9 +894,6 @@ button:focus-visible {
 .proc-table th[data-psort] {
   cursor: pointer;
 }
-.proc-table th.num {
-  text-align: right;
-}
 .proc-table th.active {
   color: var(--accent);
 }
@@ -917,9 +912,6 @@ button:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-}
-.proc-table td.num {
-  text-align: right;
 }
 .proc-table th:nth-child(1),
 .proc-table td:nth-child(1) {
