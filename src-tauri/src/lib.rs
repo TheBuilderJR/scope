@@ -333,7 +333,7 @@ async fn thumbnail(
         if meta.is_dir() {
             return Ok(None);
         }
-        let size = size.clamp(16, 512);
+        let size = size.clamp(16, 1024);
         let mtime = systime_secs(meta.modified()).unwrap_or(0);
         let key = thumb_key(&path, mtime, size);
 

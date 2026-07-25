@@ -596,23 +596,23 @@ function clearPreview() {
   previewEl.innerHTML = '<div class="preview-empty">Select an item to preview</div>';
 }
 
-// Resolve a QuickLook thumbnail URL for a file (reusing the list-view cache),
-// or null if none is available. Shared by the preview image and video poster.
-async function thumbUrl(entry) {
-  const cached = thumbCache.get(entry.path);
-  if (cached) return cached; // already an asset URL from the list view
-  try {
-    const res = await invoke("thumbnail", { path: entry.path, size: 256 });
-    if (res) return convertFileSrc(res);
-  } catch {
-    /* fall through */
-  }
-  return null;
-}
+// A large, crisp QuickLook thumbnail for the preview pane. Requested at a high
+// resolution (the pane is ~248px wide, so 2x retina needs ~500px) and cached
+// separately from the small list-view thumbnails so it isn't upscaled/blurry.
+const PREVIEW_THUMB_SIZE = 768;
+const bigThumbCache = new Map(); // path -> asset URL | null
 
-// A larger QuickLook thumbnail for the preview pane, falling back to an icon.
 async function bigThumb(entry) {
-  const url = await thumbUrl(entry);
+  let url = bigThumbCache.get(entry.path);
+  if (url === undefined) {
+    try {
+      const res = await invoke("thumbnail", { path: entry.path, size: PREVIEW_THUMB_SIZE });
+      url = res ? convertFileSrc(res) : null;
+    } catch {
+      url = null;
+    }
+    bigThumbCache.set(entry.path, url);
+  }
   if (url) return `<img class="pv-thumb" src="${url}" alt="">`;
   return `<div class="pv-bigicon">${iconFor(entry)}</div>`;
 }
