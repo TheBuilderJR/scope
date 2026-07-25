@@ -553,16 +553,24 @@ function clearPreview() {
   previewEl.innerHTML = '<div class="preview-empty">Select an item to preview</div>';
 }
 
-// A larger QuickLook thumbnail for the preview pane, falling back to an icon.
-async function bigThumb(entry) {
+// Resolve a QuickLook thumbnail URL for a file (reusing the list-view cache),
+// or null if none is available. Shared by the preview image and video poster.
+async function thumbUrl(entry) {
   const cached = thumbCache.get(entry.path);
-  if (cached) return `<img class="pv-thumb" src="${cached}" alt="">`;
+  if (cached) return cached; // already an asset URL from the list view
   try {
     const res = await invoke("thumbnail", { path: entry.path, size: 256 });
-    if (res) return `<img class="pv-thumb" src="${convertFileSrc(res)}" alt="">`;
+    if (res) return convertFileSrc(res);
   } catch {
     /* fall through */
   }
+  return null;
+}
+
+// A larger QuickLook thumbnail for the preview pane, falling back to an icon.
+async function bigThumb(entry) {
+  const url = await thumbUrl(entry);
+  if (url) return `<img class="pv-thumb" src="${url}" alt="">`;
   return `<div class="pv-bigicon">${iconFor(entry)}</div>`;
 }
 
@@ -583,7 +591,13 @@ async function showPreview(entry) {
   if (!entry.is_dir && IMG.includes(e)) {
     media = `<img class="pv-thumb" src="${convertFileSrc(entry.path)}" alt="" />`;
   } else if (!entry.is_dir && VID.includes(e)) {
-    media = `<video class="pv-media" controls preload="metadata" src="${convertFileSrc(entry.path)}"></video>`;
+    // Use the QuickLook frame as a poster so the pane always shows a preview —
+    // consistent with the list thumbnail, and a fallback for codecs the webview
+    // can't decode (mkv/avi) where the <video> would otherwise render blank.
+    const poster = await thumbUrl(entry);
+    if (selectedPath !== entry.path) return;
+    const posterAttr = poster ? ` poster="${poster}"` : "";
+    media = `<video class="pv-media" controls preload="metadata"${posterAttr} src="${convertFileSrc(entry.path)}"></video>`;
   } else if (!entry.is_dir && AUD.includes(e)) {
     media = `<audio class="pv-media" controls src="${convertFileSrc(entry.path)}"></audio>`;
   } else if (!entry.is_dir && e === "pdf") {
