@@ -452,6 +452,14 @@ button:focus-visible {
   margin: 4px 6px;
   background: var(--line);
 }
+.ctx-label {
+  padding: 4px 8px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
 .filelist td {
   padding: 6px 10px;
   border-bottom: 1px solid var(--line-soft);

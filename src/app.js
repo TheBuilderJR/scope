@@ -237,8 +237,8 @@ let currentDir = null;
 let currentEntries = [];
 let selectedPath = null;
 let selectedEntry = null;
-let sortKey = "name";
-let sortAsc = true;
+let sortKey = loadPref("scope.sortKey", "name");
+let sortAsc = loadPref("scope.sortAsc", true);
 // Finder-style view options, persisted across launches.
 let foldersOnTop = loadPref("scope.foldersOnTop", false);
 let visibleCols = loadPref("scope.visibleCols", {
@@ -398,37 +398,41 @@ function filterEntries(entries) {
   });
 }
 
+// ---- Sorting (shared by list + column views) ----
+
+// One comparator, honouring the current sortKey/sortAsc and the folders-on-top
+// option, so the list view and the Miller column view always agree.
+function compareEntries(a, b) {
+  const dir = sortAsc ? 1 : -1;
+  // Only cluster folders above files when the option is enabled; otherwise
+  // it's a pure sort on the chosen key.
+  if (foldersOnTop && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+  let cmp = 0;
+  switch (sortKey) {
+    case "size":
+      cmp = a.size - b.size;
+      break;
+    case "kind":
+      cmp = a.kind.localeCompare(b.kind);
+      break;
+    case "modified":
+      cmp = (a.modified || 0) - (b.modified || 0);
+      break;
+    case "created":
+      cmp = (a.created || 0) - (b.created || 0);
+      break;
+    default:
+      cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  }
+  // Stable tiebreaker by name so equal timestamps/sizes stay deterministic.
+  if (cmp === 0) cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  return cmp * dir;
+}
+
 // ---- List view ----
 
 function sortedFiltered() {
-  const list = filterEntries(currentEntries);
-  const dir = sortAsc ? 1 : -1;
-  list.sort((a, b) => {
-    // Only cluster folders above files when the option is enabled; otherwise
-    // it's a pure sort on the chosen key.
-    if (foldersOnTop && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    let cmp = 0;
-    switch (sortKey) {
-      case "size":
-        cmp = a.size - b.size;
-        break;
-      case "kind":
-        cmp = a.kind.localeCompare(b.kind);
-        break;
-      case "modified":
-        cmp = (a.modified || 0) - (b.modified || 0);
-        break;
-      case "created":
-        cmp = (a.created || 0) - (b.created || 0);
-        break;
-      default:
-        cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    }
-    // Stable tiebreaker by name so equal timestamps/sizes stay deterministic.
-    if (cmp === 0) cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    return cmp * dir;
-  });
-  return list;
+  return filterEntries(currentEntries).sort(compareEntries);
 }
 
 function renderFiles() {
@@ -488,10 +492,7 @@ function renderColumns() {
   columns.forEach((col, idx) => {
     const colEl = document.createElement("div");
     colEl.className = "mcol";
-    const list = filterEntries(col.listing.entries).sort((a, b) => {
-      if (foldersOnTop && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    });
+    const list = filterEntries(col.listing.entries).sort(compareEntries);
     for (const e of list) {
       const item = document.createElement("div");
       item.className = "mcol-item" + (e.hidden ? " row-hidden" : "") + (e.path === col.selectedPath ? " selected" : "");
@@ -681,20 +682,51 @@ document.getElementById("nav-home").innerHTML = svg("home");
 document.getElementById("view-list").innerHTML = svg("list");
 document.getElementById("view-columns").innerHTML = svg("columns");
 
-document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    if (sortKey === key) sortAsc = !sortAsc;
-    else {
-      sortKey = key;
-      sortAsc = true;
-    }
-    document.querySelectorAll(".filelist th[data-sort]").forEach((h) => h.classList.remove("active", "desc"));
-    th.classList.add("active");
-    if (!sortAsc) th.classList.add("desc");
-    renderFiles();
+// ---- Sort controls (shared by both views) ----
+
+const SORT_FIELDS = [
+  { key: "name", label: "Name" },
+  { key: "size", label: "Size" },
+  { key: "kind", label: "Kind" },
+  { key: "modified", label: "Date Modified" },
+  { key: "created", label: "Date Created" },
+];
+
+// Reflect the current sort on the list header (active column + direction arrow).
+function updateSortHeaderUI() {
+  document.querySelectorAll(".filelist th[data-sort]").forEach((h) => {
+    const on = h.dataset.sort === sortKey;
+    h.classList.toggle("active", on);
+    h.classList.toggle("desc", on && !sortAsc);
   });
+}
+
+// Apply a sort key. Re-selecting the active key flips the direction (Finder);
+// a new key starts ascending. Persists and re-renders whichever view is active.
+function applySort(key) {
+  if (sortKey === key) sortAsc = !sortAsc;
+  else {
+    sortKey = key;
+    sortAsc = true;
+  }
+  savePref("scope.sortKey", sortKey);
+  savePref("scope.sortAsc", sortAsc);
+  updateSortHeaderUI();
+  if (viewMode === "columns") renderColumns();
+  else renderFiles();
+}
+
+function setFoldersOnTop(on) {
+  foldersOnTop = on;
+  savePref("scope.foldersOnTop", foldersOnTop);
+  if (viewMode === "columns") renderColumns();
+  else renderFiles();
+}
+
+document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
+  th.addEventListener("click", () => applySort(th.dataset.sort));
 });
+updateSortHeaderUI();
 
 // ---- Configurable columns + sort options (Finder-style View Options) ----
 
@@ -705,19 +737,10 @@ function applyColumnVisibility() {
 }
 applyColumnVisibility();
 
-// Right-click the list header for a menu to show/hide columns and toggle
-// whether folders are kept on top (mirrors Finder's column header menu).
-const HEADER_MENU = [
-  { type: "check", label: "Keep Folders on Top", get: () => foldersOnTop, toggle: () => (foldersOnTop = !foldersOnTop) },
-  { type: "sep" },
-  { type: "col", col: "size", label: "Size" },
-  { type: "col", col: "kind", label: "Kind" },
-  { type: "col", col: "modified", label: "Date Modified" },
-  { type: "col", col: "created", label: "Date Created" },
-];
-
+// Generic context menu. `items` are {type:"sep"} or
+// {label, checked?, onClick}. A truthy `checked` shows a ✓.
 let openMenuEl = null;
-function closeHeaderMenu() {
+function closeMenu() {
   if (openMenuEl) {
     openMenuEl.remove();
     openMenuEl = null;
@@ -725,36 +748,33 @@ function closeHeaderMenu() {
   }
 }
 function onMenuOutside(e) {
-  if (openMenuEl && !openMenuEl.contains(e.target)) closeHeaderMenu();
+  if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu();
 }
 
-function openHeaderMenu(x, y) {
-  closeHeaderMenu();
+function openMenu(x, y, items) {
+  closeMenu();
   const menu = document.createElement("div");
   menu.className = "ctx-menu";
-  for (const item of HEADER_MENU) {
+  for (const item of items) {
     if (item.type === "sep") {
       const sep = document.createElement("div");
       sep.className = "ctx-sep";
       menu.appendChild(sep);
       continue;
     }
-    const on = item.type === "check" ? item.get() : visibleCols[item.col];
+    if (item.type === "label") {
+      const lbl = document.createElement("div");
+      lbl.className = "ctx-label";
+      lbl.textContent = item.label;
+      menu.appendChild(lbl);
+      continue;
+    }
     const row = document.createElement("div");
     row.className = "ctx-item";
-    row.innerHTML = `<span class="ctx-check">${on ? "✓" : ""}</span><span>${item.label}</span>`;
+    row.innerHTML = `<span class="ctx-check">${item.checked ? "✓" : ""}</span><span>${item.label}</span>`;
     row.addEventListener("click", () => {
-      if (item.type === "check") {
-        item.toggle();
-        savePref("scope.foldersOnTop", foldersOnTop);
-        renderFiles();
-        if (viewMode === "columns") renderColumns();
-      } else {
-        visibleCols[item.col] = !visibleCols[item.col];
-        savePref("scope.visibleCols", visibleCols);
-        applyColumnVisibility();
-      }
-      closeHeaderMenu();
+      item.onClick();
+      closeMenu();
     });
     menu.appendChild(row);
   }
@@ -767,9 +787,52 @@ function openHeaderMenu(x, y) {
   document.addEventListener("mousedown", onMenuOutside, true);
 }
 
+// A "Sort By" section reused by both views' context menus. Shows the arrow on
+// the active field and offers an explicit Ascending/Descending toggle.
+function sortMenuItems() {
+  const dirArrow = sortAsc ? " ▲" : " ▼";
+  return [
+    { type: "label", label: "Sort By" },
+    ...SORT_FIELDS.map((f) => ({
+      label: f.label + (f.key === sortKey ? dirArrow : ""),
+      checked: f.key === sortKey,
+      onClick: () => applySort(f.key),
+    })),
+  ];
+}
+
+// Right-click the list header: Sort By + column show/hide + folders-on-top.
 listViewEl.querySelector("thead").addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  openHeaderMenu(e.clientX, e.clientY);
+  openMenu(e.clientX, e.clientY, [
+    ...sortMenuItems(),
+    { type: "sep" },
+    { type: "label", label: "Show Columns" },
+    ...["size", "kind", "modified", "created"].map((col) => {
+      const label = SORT_FIELDS.find((f) => f.key === col).label;
+      return {
+        label,
+        checked: visibleCols[col],
+        onClick: () => {
+          visibleCols[col] = !visibleCols[col];
+          savePref("scope.visibleCols", visibleCols);
+          applyColumnVisibility();
+        },
+      };
+    }),
+    { type: "sep" },
+    { label: "Keep Folders on Top", checked: foldersOnTop, onClick: () => setFoldersOnTop(!foldersOnTop) },
+  ]);
+});
+
+// Right-click anywhere in the column view: Sort By + folders-on-top.
+columnViewEl.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  openMenu(e.clientX, e.clientY, [
+    ...sortMenuItems(),
+    { type: "sep" },
+    { label: "Keep Folders on Top", checked: foldersOnTop, onClick: () => setFoldersOnTop(!foldersOnTop) },
+  ]);
 });
 
 // ===========================================================================
