@@ -632,20 +632,6 @@ button:focus-visible {
   gap: 12px;
   align-items: start;
 }
-
-/* Draggable column resize handles */
-.col-resize {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 6px;
-  height: 100%;
-  cursor: col-resize;
-  z-index: 3;
-}
-.col-resize:hover {
-  background: var(--line);
-}
 .graph-card {
   display: flex;
   flex-direction: column;

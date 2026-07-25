@@ -992,9 +992,18 @@ setInterval(pollMonitor, POLL_MS);
 // Resizable table columns (Finder list + process table)
 // ===========================================================================
 
+// Boundary-based resizing: rather than positioned handle elements (unreliable
+// inside table cells in WebKit), we detect when the cursor is near a resizable
+// column's right edge on the header row and drag from there.
+const RESIZE_EDGE = 6; // px hit zone around a column boundary
+
 function makeColumnsResizable(table, storageKey) {
   if (!table) return;
+  const thead = table.querySelector("thead");
+  if (!thead) return;
   const ths = Array.from(table.querySelectorAll("thead th"));
+
+  // Restore any saved widths.
   let saved = {};
   try {
     saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
@@ -1003,40 +1012,91 @@ function makeColumnsResizable(table, storageKey) {
   }
   ths.forEach((th, i) => {
     if (saved[i] && th.dataset.flex !== "1" && th.dataset.noresize !== "1") {
-      th.style.width = saved[i] + "px";
+      th.style.width = `${saved[i]}px`;
     }
   });
-  ths.forEach((th) => {
-    if (th.dataset.flex === "1" || th.dataset.noresize === "1") return;
-    const handle = document.createElement("span");
-    handle.className = "col-resize";
-    handle.addEventListener("click", (e) => e.stopPropagation());
-    handle.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      e.stopPropagation(); // don't trigger column sort
-      const startX = e.clientX;
-      const startW = th.offsetWidth;
-      const onMove = (ev) => {
-        th.style.width = `${Math.max(40, startW + ev.clientX - startX)}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-        const widths = {};
-        ths.forEach((t, j) => {
-          if (t.style.width) widths[j] = parseInt(t.style.width, 10);
-        });
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(widths));
-        } catch {
-          /* ignore quota errors */
-        }
-      };
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
+
+  const resizable = (th) => th && th.dataset.flex !== "1" && th.dataset.noresize !== "1";
+
+  // Which th's right edge is within RESIZE_EDGE px of clientX?
+  const edgeThAt = (clientX) => {
+    for (const th of ths) {
+      if (!resizable(th)) continue;
+      if (Math.abs(clientX - th.getBoundingClientRect().right) <= RESIZE_EDGE) return th;
+    }
+    return null;
+  };
+
+  let cursorTh = null;
+  let dragging = null; // { th, startX, startW }
+  let suppressClick = false;
+
+  const persist = () => {
+    const widths = {};
+    ths.forEach((t, j) => {
+      if (t.style.width) widths[j] = parseInt(t.style.width, 10);
     });
-    th.appendChild(handle);
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(widths));
+    } catch {
+      /* ignore quota errors */
+    }
+  };
+
+  thead.addEventListener("mousemove", (e) => {
+    if (dragging) return;
+    const th = edgeThAt(e.clientX);
+    if (cursorTh && cursorTh !== th) cursorTh.style.cursor = "";
+    if (th) th.style.cursor = "col-resize";
+    cursorTh = th;
   });
+  thead.addEventListener("mouseleave", () => {
+    if (dragging) return;
+    if (cursorTh) cursorTh.style.cursor = "";
+    cursorTh = null;
+  });
+
+  thead.addEventListener("mousedown", (e) => {
+    suppressClick = false;
+    const th = edgeThAt(e.clientX);
+    if (!th) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = th.offsetWidth;
+    let moved = false;
+    dragging = { th };
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (ev) => {
+      moved = true;
+      th.style.width = `${Math.max(40, startW + ev.clientX - startX)}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      dragging = null;
+      if (moved) {
+        suppressClick = true; // eat the click that follows a drag (no sort)
+        persist();
+      }
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+
+  // Stop a resize drag from also triggering a column sort.
+  thead.addEventListener(
+    "click",
+    (e) => {
+      if (suppressClick) {
+        e.stopPropagation();
+        e.preventDefault();
+        suppressClick = false;
+      }
+    },
+    true
+  );
 }
 
 makeColumnsResizable(document.querySelector("#list-view table"), "scope.colw.files");
