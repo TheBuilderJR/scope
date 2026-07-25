@@ -37,7 +37,8 @@ function fmtDuration(secs) {
   const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = secs % 60;
-  if (d > 0) return `${d}d ${h}h ${m}m`;
+  // At most two units so it never overflows the narrow Time column.
+  if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
@@ -211,8 +212,8 @@ function switchView(name) {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === name));
   Object.entries(views).forEach(([k, el]) => el.classList.toggle("active", k === name));
   if (name === "monitor") {
-    resetNetBaseline();
     pollMonitor();
+    drawAllGraphs();
   }
 }
 
@@ -661,50 +662,62 @@ document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
 // ===========================================================================
 
 const POLL_MS = 1500;
-const HIST = 120; // ~3 minutes of history at POLL_MS
+const MAX_WINDOW_MS = 60 * 60 * 1000; // retain up to 1h of history
+let windowMs = 60 * 1000; // visible time window, default 1 minute
 let netPrev = null; // { rx, tx, t }
 let procSortKey = "cpu";
 let procSortAsc = false;
 let lastProcs = [];
 
-const cpuHist = [];
-const memHist = [];
-const netDownHist = [];
-const netUpHist = [];
+// Time-series history: one timestamped sample per poll, kept for MAX_WINDOW_MS.
+const hist = []; // { t, cpu, mem, down, up }
 
-function pushHist(arr, v) {
-  arr.push(v);
-  if (arr.length > HIST) arr.shift();
-}
-
-function resetNetBaseline() {
-  netPrev = null;
+// Record a sample on every poll (even when the Monitor tab isn't visible) so
+// longer windows fill in. Returns the derived rates for the current readout.
+function recordSample(s) {
+  const t = Date.now();
+  const memPct = s.mem_total ? (s.mem_used / s.mem_total) * 100 : 0;
+  let down = 0;
+  let up = 0;
+  if (netPrev) {
+    const dt = (t - netPrev.t) / 1000;
+    if (dt > 0) {
+      down = Math.max(0, (s.net_rx_total - netPrev.rx) / dt);
+      up = Math.max(0, (s.net_tx_total - netPrev.tx) / dt);
+    }
+  }
+  netPrev = { rx: s.net_rx_total, tx: s.net_tx_total, t };
+  hist.push({ t, cpu: s.cpu_usage, mem: memPct, down, up });
+  const cutoff = t - MAX_WINDOW_MS;
+  while (hist.length && hist[0].t < cutoff) hist.shift();
+  return { down, up };
 }
 
 async function pollMonitor() {
-  if (activeView !== "monitor") return;
+  let snap;
   try {
-    const [snap, procs] = await Promise.all([invoke("system_snapshot"), maybeProcs()]);
-    renderSnapshot(snap);
-    if (procs) {
-      lastProcs = procs;
-      renderProcs();
-    }
+    snap = await invoke("system_snapshot");
   } catch (e) {
     console.error(e);
+    return;
+  }
+  const rates = recordSample(snap); // always accumulate history
+  if (activeView !== "monitor") return; // only touch the DOM when visible
+  renderSnapshot(snap, rates);
+  if (!document.getElementById("proc-pause").checked) {
+    try {
+      lastProcs = await invoke("process_list");
+      renderProcs();
+    } catch (e) {
+      console.error(e);
+    }
   }
 }
 
-function maybeProcs() {
-  if (document.getElementById("proc-pause").checked) return Promise.resolve(null);
-  return invoke("process_list");
-}
-
-function renderSnapshot(s) {
+function renderSnapshot(s, rates) {
   // ----- CPU -----
   document.getElementById("cpu-total").textContent = `${s.cpu_usage.toFixed(1)}%`;
   document.getElementById("cpu-brand").textContent = s.cpu_brand;
-  pushHist(cpuHist, s.cpu_usage);
 
   const coresEl = document.getElementById("cpu-cores");
   coresEl.innerHTML = "";
@@ -727,7 +740,6 @@ function renderSnapshot(s) {
 
   // ----- Memory -----
   const memPct = s.mem_total ? (s.mem_used / s.mem_total) * 100 : 0;
-  pushHist(memHist, memPct);
   document.getElementById("mem-bar").style.width = `${memPct.toFixed(1)}%`;
   document.getElementById("mem-label").textContent = `${memPct.toFixed(0)}%`;
   const memText = `${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)}`;
@@ -741,23 +753,10 @@ function renderSnapshot(s) {
     ? `${fmtBytes(s.swap_used)} / ${fmtBytes(s.swap_total)}`
     : "none";
 
-  // ----- Network -----
-  const now = performance.now() / 1000;
-  let down = 0;
-  let up = 0;
-  if (netPrev) {
-    const dt = now - netPrev.t;
-    if (dt > 0) {
-      down = Math.max(0, (s.net_rx_total - netPrev.rx) / dt);
-      up = Math.max(0, (s.net_tx_total - netPrev.tx) / dt);
-    }
-  }
-  netPrev = { rx: s.net_rx_total, tx: s.net_tx_total, t: now };
-  pushHist(netDownHist, down);
-  pushHist(netUpHist, up);
-  document.getElementById("net-down").textContent = fmtRate(down);
-  document.getElementById("net-up").textContent = fmtRate(up);
-  document.getElementById("net-metric").textContent = `↓${fmtRate(down)}  ↑${fmtRate(up)}`;
+  // ----- Network (rates already derived in recordSample) -----
+  document.getElementById("net-down").textContent = fmtRate(rates.down);
+  document.getElementById("net-up").textContent = fmtRate(rates.up);
+  document.getElementById("net-metric").textContent = `↓${fmtRate(rates.down)}  ↑${fmtRate(rates.up)}`;
 
   // ----- System info -----
   document.getElementById("load-avg").textContent = `${s.load_one.toFixed(2)}  ${s.load_five.toFixed(
@@ -787,22 +786,47 @@ function renderSnapshot(s) {
   });
 
   // ----- Graphs -----
-  drawGraph(document.getElementById("graph-cpu"), [{ data: cpuHist, color: "#0a63ce", fill: "rgba(10,99,206,0.12)" }], 100, "100%");
-  drawGraph(document.getElementById("graph-mem"), [{ data: memHist, color: "#34c759", fill: "rgba(52,199,89,0.12)" }], 100, "100%");
-  const netMax = Math.max(1024, ...netDownHist, ...netUpHist);
-  drawGraph(
+  drawAllGraphs();
+}
+
+// Compact "time ago" label for x-axis ticks.
+function axisAgo(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.round(m / 60)}h`;
+}
+
+function drawAllGraphs() {
+  drawTimeGraph(
+    document.getElementById("graph-cpu"),
+    [{ key: "cpu", color: "#0a63ce", fill: "rgba(10,99,206,0.12)" }],
+    100,
+    "100%"
+  );
+  drawTimeGraph(
+    document.getElementById("graph-mem"),
+    [{ key: "mem", color: "#34c759", fill: "rgba(52,199,89,0.12)" }],
+    100,
+    "100%"
+  );
+  const start = Date.now() - windowMs;
+  let netMax = 1024;
+  for (const p of hist) if (p.t >= start) netMax = Math.max(netMax, p.down, p.up);
+  drawTimeGraph(
     document.getElementById("graph-net"),
     [
-      { data: netDownHist, color: "#34c759", fill: "rgba(52,199,89,0.10)" },
-      { data: netUpHist, color: "#0a63ce", fill: "rgba(10,99,206,0.10)" },
+      { key: "down", color: "#34c759", fill: "rgba(52,199,89,0.10)" },
+      { key: "up", color: "#0a63ce", fill: "rgba(10,99,206,0.10)" },
     ],
     netMax,
     fmtRate(netMax)
   );
 }
 
-// Canvas time-series renderer.
-function drawGraph(canvas, seriesList, yMax, yLabel) {
+// Canvas time-series renderer with an x-axis time scale over `windowMs`.
+function drawTimeGraph(canvas, series, yMax, yLabel) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
@@ -815,48 +839,68 @@ function drawGraph(canvas, seriesList, yMax, yLabel) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
 
-  // gridlines at 25/50/75%
+  const AXIS_H = 13; // reserve bottom strip for time labels
+  const plotH = h - AXIS_H;
+  const now = Date.now();
+  const start = now - windowMs;
+  const xFor = (t) => ((t - start) / windowMs) * w;
+  const yFor = (v) => plotH - (Math.min(v, yMax) / yMax) * (plotH - 2) - 1;
+
+  // horizontal gridlines at 25/50/75%
   ctx.strokeStyle = "rgba(0,0,0,0.06)";
   ctx.lineWidth = 1;
   for (let g = 1; g <= 3; g++) {
-    const y = (h * g) / 4;
+    const y = (plotH * g) / 4;
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(w, y);
     ctx.stroke();
   }
 
-  const n = HIST;
-  const stepX = w / (n - 1);
-  const xFor = (i, len) => (i + (n - len)) * stepX; // right-align newest sample
-  const yFor = (v) => h - (Math.min(v, yMax) / yMax) * (h - 2) - 1;
-
-  for (const series of seriesList) {
-    const d = series.data;
-    if (d.length < 2) continue;
-    // fill under the curve
+  // x-axis ticks + labels
+  const TICKS = 4;
+  ctx.font = "9px -apple-system, sans-serif";
+  ctx.textBaseline = "bottom";
+  for (let i = 0; i <= TICKS; i++) {
+    const x = (i / TICKS) * w;
+    ctx.strokeStyle = "rgba(0,0,0,0.05)";
     ctx.beginPath();
-    ctx.moveTo(xFor(0, d.length), h);
-    d.forEach((v, i) => ctx.lineTo(xFor(i, d.length), yFor(v)));
-    ctx.lineTo(xFor(d.length - 1, d.length), h);
-    ctx.closePath();
-    ctx.fillStyle = series.fill;
-    ctx.fill();
-    // line
-    ctx.beginPath();
-    d.forEach((v, i) => {
-      const x = xFor(i, d.length);
-      const y = yFor(v);
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = series.color;
-    ctx.lineWidth = 1.5;
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, plotH);
     ctx.stroke();
+    const msAgo = windowMs - (i / TICKS) * windowMs;
+    const label = i === TICKS ? "now" : "-" + axisAgo(msAgo);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.textAlign = i === 0 ? "left" : i === TICKS ? "right" : "center";
+    ctx.fillText(label, i === 0 ? 2 : i === TICKS ? w - 2 : x, h);
   }
 
-  // Vertical-scale ceiling label (top-left).
+  // series
+  const pts = hist.filter((p) => p.t >= start);
+  if (pts.length >= 2) {
+    for (const sdef of series) {
+      ctx.beginPath();
+      ctx.moveTo(xFor(pts[0].t), plotH);
+      for (const p of pts) ctx.lineTo(xFor(p.t), yFor(p[sdef.key]));
+      ctx.lineTo(xFor(pts[pts.length - 1].t), plotH);
+      ctx.closePath();
+      ctx.fillStyle = sdef.fill;
+      ctx.fill();
+      ctx.beginPath();
+      pts.forEach((p, idx) => {
+        const x = xFor(p.t);
+        const y = yFor(p[sdef.key]);
+        idx === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = sdef.color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // y-scale ceiling label (top-left)
   if (yLabel) {
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
     ctx.font = "10px -apple-system, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
@@ -933,7 +977,70 @@ document.querySelectorAll(".proc-table th[data-psort]").forEach((th) => {
 });
 document.getElementById("proc-search").addEventListener("input", renderProcs);
 
+// ---- Time-window selector ----
+document.querySelectorAll("#window-selector .win").forEach((b) => {
+  b.addEventListener("click", () => {
+    windowMs = parseInt(b.dataset.win, 10);
+    document.querySelectorAll("#window-selector .win").forEach((x) => x.classList.toggle("active", x === b));
+    drawAllGraphs();
+  });
+});
+
 setInterval(pollMonitor, POLL_MS);
+
+// ===========================================================================
+// Resizable table columns (Finder list + process table)
+// ===========================================================================
+
+function makeColumnsResizable(table, storageKey) {
+  if (!table) return;
+  const ths = Array.from(table.querySelectorAll("thead th"));
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+  } catch {
+    saved = {};
+  }
+  ths.forEach((th, i) => {
+    if (saved[i] && th.dataset.flex !== "1" && th.dataset.noresize !== "1") {
+      th.style.width = saved[i] + "px";
+    }
+  });
+  ths.forEach((th) => {
+    if (th.dataset.flex === "1" || th.dataset.noresize === "1") return;
+    const handle = document.createElement("span");
+    handle.className = "col-resize";
+    handle.addEventListener("click", (e) => e.stopPropagation());
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation(); // don't trigger column sort
+      const startX = e.clientX;
+      const startW = th.offsetWidth;
+      const onMove = (ev) => {
+        th.style.width = `${Math.max(40, startW + ev.clientX - startX)}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        const widths = {};
+        ths.forEach((t, j) => {
+          if (t.style.width) widths[j] = parseInt(t.style.width, 10);
+        });
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(widths));
+        } catch {
+          /* ignore quota errors */
+        }
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    th.appendChild(handle);
+  });
+}
+
+makeColumnsResizable(document.querySelector("#list-view table"), "scope.colw.files");
+makeColumnsResizable(document.querySelector(".proc-table"), "scope.colw.proc");
 
 // ===========================================================================
 // CLI forwarding: `scope <folder>` from a second invocation

@@ -51,7 +51,7 @@
             <table>
               <thead>
                 <tr>
-                  <th class="col-name active" data-sort="name">Name</th>
+                  <th class="col-name active" data-sort="name" data-flex="1">Name</th>
                   <th class="col-size" data-sort="size">Size</th>
                   <th class="col-kind" data-sort="kind">Kind</th>
                   <th class="col-date" data-sort="modified">Date Modified</th>
@@ -76,6 +76,16 @@
 
     <!-- ============================ MONITOR ============================ -->
     <section id="monitor" class="view">
+      <!-- Time-window selector -->
+      <div class="monitor-top">
+        <div class="window-selector" id="window-selector">
+          <button class="win active" data-win="60000">1m</button>
+          <button class="win" data-win="300000">5m</button>
+          <button class="win" data-win="900000">15m</button>
+          <button class="win" data-win="3600000">1h</button>
+        </div>
+      </div>
+
       <!-- Time-series graphs -->
       <div class="graphs">
         <div class="card graph-card">
@@ -156,14 +166,14 @@
           <table class="proc-table">
             <thead>
               <tr>
-                <th data-psort="pid" class="num">PID</th>
-                <th data-psort="name">Name</th>
+                <th data-psort="pid">PID</th>
+                <th data-psort="name" data-flex="1">Name</th>
                 <th data-psort="cpu" class="num active desc">CPU%</th>
                 <th data-psort="memory" class="num">Memory</th>
                 <th data-psort="disk_write" class="num">Disk W</th>
                 <th data-psort="status">Status</th>
-                <th data-psort="run_time" class="num">Time</th>
-                <th></th>
+                <th data-psort="run_time">Time</th>
+                <th data-noresize="1"></th>
               </tr>
             </thead>
             <tbody id="proc-rows"></tbody>

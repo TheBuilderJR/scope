@@ -600,11 +600,53 @@ button:focus-visible {
   overflow-y: auto;
   background: var(--bg);
 }
+.monitor-top {
+  display: flex;
+  justify-content: flex-end;
+}
+.window-selector {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.window-selector .win {
+  border: none;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+  background: #fdfdfd;
+  color: var(--text-dim);
+  padding: 4px 13px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.window-selector .win:last-child {
+  border-right: none;
+}
+.window-selector .win.active {
+  background: var(--accent);
+  color: #fff;
+}
 .graphs {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
   align-items: start;
+}
+
+/* Draggable column resize handles */
+.col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+.col-resize:hover {
+  background: var(--line);
 }
 .graph-card {
   display: flex;
@@ -901,7 +943,7 @@ button:focus-visible {
 }
 .proc-table th:nth-child(7),
 .proc-table td:nth-child(7) {
-  width: 80px;
+  width: 92px;
 }
 .proc-table th:nth-child(8),
 .proc-table td:nth-child(8) {
