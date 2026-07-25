@@ -358,6 +358,13 @@ button:focus-visible {
 .filelist th:hover {
   color: var(--text);
 }
+/* Column divider lines (also mark the draggable resize boundaries) */
+.filelist thead th:not(:last-child) {
+  border-right: 1px solid var(--line);
+}
+.filelist tbody td:not(:last-child) {
+  border-right: 1px solid var(--line-soft);
+}
 .filelist th.active {
   color: var(--accent);
 }
@@ -879,6 +886,12 @@ button:focus-visible {
 }
 .proc-table th[data-psort] {
   cursor: pointer;
+}
+.proc-table th:not(:last-child) {
+  border-right: 1px solid var(--line);
+}
+.proc-table td:not(:last-child) {
+  border-right: 1px solid var(--line-soft);
 }
 .proc-table th.active {
   color: var(--accent);

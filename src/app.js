@@ -992,18 +992,22 @@ setInterval(pollMonitor, POLL_MS);
 // Resizable table columns (Finder list + process table)
 // ===========================================================================
 
-// Boundary-based resizing: rather than positioned handle elements (unreliable
-// inside table cells in WebKit), we detect when the cursor is near a resizable
-// column's right edge on the header row and drag from there.
+// Boundary-based resizing: detect when the cursor is near a column boundary on
+// the header row (no positioned child elements — those don't get a reliable
+// containing block inside table cells in WebKit). Dragging a boundary grows the
+// left column and shrinks the right one by the same amount (neighbor resize), so
+// the boundary tracks the cursor and only those two columns move.
 const RESIZE_EDGE = 6; // px hit zone around a column boundary
+const MIN_COL = 44; // px minimum column width
 
 function makeColumnsResizable(table, storageKey) {
   if (!table) return;
   const thead = table.querySelector("thead");
   if (!thead) return;
   const ths = Array.from(table.querySelectorAll("thead th"));
+  const participates = (th) => th && th.dataset.noresize !== "1";
 
-  // Restore any saved widths.
+  // Restore saved widths.
   let saved = {};
   try {
     saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
@@ -1011,25 +1015,30 @@ function makeColumnsResizable(table, storageKey) {
     saved = {};
   }
   ths.forEach((th, i) => {
-    if (saved[i] && th.dataset.flex !== "1" && th.dataset.noresize !== "1") {
-      th.style.width = `${saved[i]}px`;
-    }
+    if (saved[i] && participates(th)) th.style.width = `${saved[i]}px`;
   });
 
-  const resizable = (th) => th && th.dataset.flex !== "1" && th.dataset.noresize !== "1";
-
-  // Which th's right edge is within RESIZE_EDGE px of clientX?
-  const edgeThAt = (clientX) => {
-    for (const th of ths) {
-      if (!resizable(th)) continue;
-      if (Math.abs(clientX - th.getBoundingClientRect().right) <= RESIZE_EDGE) return th;
+  // The boundary near clientX is the right edge of th[i] where th[i] and
+  // th[i+1] both participate. Returns [A, B] (left, right) or null.
+  const boundaryAt = (clientX) => {
+    for (let i = 0; i < ths.length - 1; i++) {
+      const A = ths[i];
+      const B = ths[i + 1];
+      if (!participates(A) || !participates(B)) continue;
+      if (Math.abs(clientX - A.getBoundingClientRect().right) <= RESIZE_EDGE) return [A, B];
     }
     return null;
   };
 
-  let cursorTh = null;
-  let dragging = null; // { th, startX, startW }
+  let cursored = [];
+  let dragging = false;
   let suppressClick = false;
+
+  const setCursor = (pair) => {
+    cursored.forEach((th) => (th.style.cursor = ""));
+    cursored = pair || [];
+    cursored.forEach((th) => (th.style.cursor = "col-resize"));
+  };
 
   const persist = () => {
     const widths = {};
@@ -1045,37 +1054,37 @@ function makeColumnsResizable(table, storageKey) {
 
   thead.addEventListener("mousemove", (e) => {
     if (dragging) return;
-    const th = edgeThAt(e.clientX);
-    if (cursorTh && cursorTh !== th) cursorTh.style.cursor = "";
-    if (th) th.style.cursor = "col-resize";
-    cursorTh = th;
+    setCursor(boundaryAt(e.clientX));
   });
   thead.addEventListener("mouseleave", () => {
-    if (dragging) return;
-    if (cursorTh) cursorTh.style.cursor = "";
-    cursorTh = null;
+    if (!dragging) setCursor(null);
   });
 
   thead.addEventListener("mousedown", (e) => {
     suppressClick = false;
-    const th = edgeThAt(e.clientX);
-    if (!th) return;
+    const pair = boundaryAt(e.clientX);
+    if (!pair) return;
+    const [A, B] = pair;
     e.preventDefault();
     const startX = e.clientX;
-    const startW = th.offsetWidth;
+    const startA = A.offsetWidth;
+    const sum = startA + B.offsetWidth;
     let moved = false;
-    dragging = { th };
+    dragging = true;
     document.body.style.cursor = "col-resize";
 
     const onMove = (ev) => {
       moved = true;
-      th.style.width = `${Math.max(40, startW + ev.clientX - startX)}px`;
+      const newA = Math.max(MIN_COL, Math.min(sum - MIN_COL, startA + ev.clientX - startX));
+      A.style.width = `${newA}px`;
+      B.style.width = `${sum - newA}px`;
     };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.style.cursor = "";
-      dragging = null;
+      dragging = false;
+      setCursor(null);
       if (moved) {
         suppressClick = true; // eat the click that follows a drag (no sort)
         persist();
