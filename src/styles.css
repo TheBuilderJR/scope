@@ -530,11 +530,20 @@ button:focus-visible {
   background: var(--bg);
 }
 .mcol {
-  width: 230px;
+  width: var(--mcol-w, 230px);
   flex-shrink: 0;
-  border-right: 1px solid var(--line);
   overflow-y: auto;
   padding: 4px;
+}
+/* Draggable divider between Miller columns (Finder-style horizontal resize). */
+.mcol-resizer {
+  flex: 0 0 5px;
+  align-self: stretch;
+  cursor: col-resize;
+  border-left: 1px solid var(--line);
+}
+.mcol-resizer:hover {
+  border-left-color: var(--accent);
 }
 .mcol-item {
   display: flex;

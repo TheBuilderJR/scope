@@ -247,6 +247,7 @@ let visibleCols = loadPref("scope.visibleCols", {
   modified: true,
   created: false,
 });
+let mcolWidth = loadPref("scope.mcolWidth", 230); // Miller column width (px)
 
 function loadPref(key, fallback) {
   try {
@@ -486,6 +487,42 @@ function openEntry(entry) {
 
 // ---- Column (Miller) view ----
 
+const MCOL_MIN = 140;
+const MCOL_MAX = 700;
+const MCOL_RESIZER = 5; // px; must match .mcol-resizer flex-basis in styles.css
+
+// Column width is shared by all columns via a CSS var on the container, so it
+// survives the innerHTML rebuild in renderColumns() (inline style isn't cleared).
+function applyMcolWidth() {
+  columnViewEl.style.setProperty("--mcol-w", `${mcolWidth}px`);
+}
+
+// idx is the dragged column's position. All columns share one width, so the
+// divider after column idx sits at contentLeft + (idx+1)*width — solve for the
+// width that puts that divider under the cursor, so the grip tracks precisely.
+function startMcolResize(e, idx) {
+  e.preventDefault();
+  const rectLeft = columnViewEl.getBoundingClientRect().left;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  const onMove = (ev) => {
+    const contentLeft = rectLeft - columnViewEl.scrollLeft;
+    // Subtract the dividers left of the grip so the width solves exactly.
+    const w = (ev.clientX - contentLeft - idx * MCOL_RESIZER) / (idx + 1);
+    mcolWidth = Math.max(MCOL_MIN, Math.min(MCOL_MAX, w));
+    applyMcolWidth();
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    savePref("scope.mcolWidth", mcolWidth);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
 function renderColumns() {
   thumbObserver.disconnect();
   // Preserve each existing column's vertical scroll so drilling into a folder
@@ -516,6 +553,12 @@ function renderColumns() {
       colEl.appendChild(empty);
     }
     columnViewEl.appendChild(colEl);
+    // Draggable divider to resize the columns (all columns share one width,
+    // like Finder). Sits between/after columns as its own flex child.
+    const resizer = document.createElement("div");
+    resizer.className = "mcol-resizer";
+    resizer.addEventListener("mousedown", (e) => startMcolResize(e, idx));
+    columnViewEl.appendChild(resizer);
   });
   // Restore prior vertical scroll positions for columns that persisted; any
   // newly added column has no saved value and correctly starts at the top.
@@ -758,6 +801,7 @@ function applyColumnVisibility() {
   }
 }
 applyColumnVisibility();
+applyMcolWidth();
 
 // Generic context menu. `items` are {type:"sep"} or
 // {label, checked?, onClick}. A truthy `checked` shows a ✓.
