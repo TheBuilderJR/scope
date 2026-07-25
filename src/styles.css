@@ -9,7 +9,7 @@
   --line-soft: #ededf0;
   --text: #1d1d1f;
   --text-dim: #6e6e73;
-  --text-faint: #9a9aa0;
+  --text-faint: #6f6f74;
   --accent: #0a63ce;
   --accent-soft: #e3edfb;
   --sel: #0a63ce;
@@ -18,6 +18,8 @@
   --yellow: #ffcc00;
   --orange: #ff9500;
   --red: #ff3b30;
+  --orange-text: #a85400;
+  --red-text: #c9271d;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
   font-synthesis: none;
 }
@@ -188,15 +190,20 @@ input[type="search"]:focus {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   gap: 2px;
   white-space: nowrap;
+}
+.breadcrumb::-webkit-scrollbar {
+  display: none;
 }
 .crumb {
   color: var(--text-dim);
   padding: 3px 6px;
   border-radius: 6px;
   cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .crumb:hover {
   background: rgba(0, 0, 0, 0.05);
@@ -205,6 +212,10 @@ input[type="search"]:focus {
 .crumb.current {
   color: var(--text);
   font-weight: 600;
+  cursor: default;
+}
+.crumb.current:hover {
+  background: transparent;
 }
 .crumb-sep {
   color: var(--text-faint);
@@ -237,7 +248,7 @@ input[type="search"]:focus {
   overflow-y: auto;
 }
 .sidebar-title {
-  color: var(--text-faint);
+  color: var(--text-dim);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.6px;
@@ -259,6 +270,7 @@ input[type="search"]:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .sidebar li:hover {
   background: rgba(0, 0, 0, 0.05);
@@ -301,6 +313,16 @@ input[type="search"]:focus {
   display: block;
 }
 
+/* Shared keyboard focus ring */
+.crumb:focus-visible,
+.sidebar li:focus-visible,
+.tab:focus-visible,
+.vt:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 #finder-main {
   flex: 1;
   min-width: 0;
@@ -329,12 +351,22 @@ input[type="search"]:focus {
   color: var(--text-dim);
   font-size: 11px;
   padding: 7px 10px;
-  border-bottom: 1px solid var(--line);
+  box-shadow: inset 0 -1px 0 var(--line);
   cursor: pointer;
   z-index: 1;
 }
 .filelist th:hover {
   color: var(--text);
+}
+.filelist th.active {
+  color: var(--accent);
+}
+.filelist th.active::after {
+  content: " \25B2";
+  font-size: 9px;
+}
+.filelist th.active.desc::after {
+  content: " \25BC";
 }
 .col-name {
   width: auto;
@@ -364,6 +396,12 @@ input[type="search"]:focus {
 .filelist td.kind,
 .filelist td.date {
   color: var(--text-dim);
+}
+.filelist td.date {
+  font-variant-numeric: tabular-nums;
+}
+.filelist tbody tr {
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .filelist tbody tr:hover {
   background: var(--bg-elev);
@@ -429,6 +467,13 @@ input[type="search"]:focus {
   cursor: default;
   white-space: nowrap;
   overflow: hidden;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.mcol-empty {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 11px;
+  padding: 24px 12px;
 }
 .mcol-item .txt {
   overflow: hidden;
@@ -559,6 +604,7 @@ input[type="search"]:focus {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
+  align-items: start;
 }
 .graph-card {
   display: flex;
@@ -666,6 +712,7 @@ input[type="search"]:focus {
 .core .core-pct {
   width: 34px;
   flex-shrink: 0;
+  text-align: right;
 }
 
 .bar {
@@ -698,7 +745,8 @@ input[type="search"]:focus {
   top: 50%;
   transform: translateY(-50%);
   font-size: 10px;
-  color: var(--text);
+  color: #fff;
+  mix-blend-mode: difference;
   font-variant-numeric: tabular-nums;
 }
 
@@ -754,6 +802,7 @@ input[type="search"]:focus {
 
 /* ---------------- Process table ---------------- */
 .proc-panel {
+  flex: 1;
   min-height: 260px;
   display: flex;
   flex-direction: column;
@@ -784,7 +833,6 @@ input[type="search"]:focus {
 .proc-scroll {
   flex: 1;
   overflow-y: auto;
-  max-height: 420px;
 }
 .proc-table {
   width: 100%;
@@ -800,15 +848,24 @@ input[type="search"]:focus {
   color: var(--text-dim);
   font-size: 11px;
   padding: 7px 10px;
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
+  box-shadow: inset 0 -1px 0 var(--line);
   z-index: 1;
+}
+.proc-table th[data-psort] {
+  cursor: pointer;
 }
 .proc-table th.num {
   text-align: right;
 }
 .proc-table th.active {
   color: var(--accent);
+}
+.proc-table th.active::after {
+  content: " \25B2";
+  font-size: 9px;
+}
+.proc-table th.active.desc::after {
+  content: " \25BC";
 }
 .proc-table td {
   padding: 5px 10px;
@@ -854,11 +911,11 @@ input[type="search"]:focus {
   background: var(--bg);
 }
 .cpu-hot {
-  color: var(--orange);
+  color: var(--orange-text);
   font-weight: 600;
 }
 .cpu-veryhot {
-  color: var(--red);
+  color: var(--red-text);
   font-weight: 600;
 }
 .kill-btn {
@@ -868,10 +925,20 @@ input[type="search"]:focus {
   background: transparent;
   box-shadow: none;
   color: var(--text-faint);
+  border-radius: 4px;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .kill-btn:hover {
   background: var(--red);
   color: #fff;
+}
+.kill-btn:active {
+  background: #c9271d;
+  color: #fff;
+}
+.kill-btn:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 1px;
 }
 
 /* usage-tinted bar segments (htop feel) */

@@ -263,8 +263,16 @@ function buildFavorites() {
   favs.forEach((f) => {
     const li = document.createElement("li");
     li.dataset.path = f.path;
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
     li.innerHTML = `<span class="ico">${svg(f.ico)}</span><span>${f.name}</span>`;
     li.addEventListener("click", () => navigate(f.path));
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        navigate(f.path);
+      }
+    });
     favoritesEl.appendChild(li);
   });
 }
@@ -323,6 +331,16 @@ function renderBreadcrumb(fullPath) {
     span.className = "crumb" + (isCurrent ? " current" : "");
     span.textContent = label;
     span.addEventListener("click", () => navigate(path));
+    if (!isCurrent) {
+      span.tabIndex = 0;
+      span.setAttribute("role", "button");
+      span.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          navigate(path);
+        }
+      });
+    }
     breadcrumbEl.appendChild(span);
   };
   addCrumb("/", "/", parts.length === 0);
@@ -335,6 +353,8 @@ function renderBreadcrumb(fullPath) {
     breadcrumbEl.appendChild(sep);
     addCrumb(part, acc, i === parts.length - 1);
   });
+  // Keep the current (trailing) crumb visible on deep paths.
+  breadcrumbEl.scrollLeft = breadcrumbEl.scrollWidth;
 }
 
 function filterEntries(entries) {
@@ -444,6 +464,12 @@ function renderColumns() {
       });
       attachThumb(item.querySelector(".ico"), e);
       colEl.appendChild(item);
+    }
+    if (list.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mcol-empty";
+      empty.textContent = "This folder is empty";
+      colEl.appendChild(empty);
     }
     columnViewEl.appendChild(colEl);
   });
@@ -623,6 +649,9 @@ document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
       sortKey = key;
       sortAsc = true;
     }
+    document.querySelectorAll(".filelist th[data-sort]").forEach((h) => h.classList.remove("active", "desc"));
+    th.classList.add("active");
+    if (!sortAsc) th.classList.add("desc");
     renderFiles();
   });
 });
@@ -758,8 +787,8 @@ function renderSnapshot(s) {
   });
 
   // ----- Graphs -----
-  drawGraph(document.getElementById("graph-cpu"), [{ data: cpuHist, color: "#0a63ce", fill: "rgba(10,99,206,0.12)" }], 100);
-  drawGraph(document.getElementById("graph-mem"), [{ data: memHist, color: "#34c759", fill: "rgba(52,199,89,0.12)" }], 100);
+  drawGraph(document.getElementById("graph-cpu"), [{ data: cpuHist, color: "#0a63ce", fill: "rgba(10,99,206,0.12)" }], 100, "100%");
+  drawGraph(document.getElementById("graph-mem"), [{ data: memHist, color: "#34c759", fill: "rgba(52,199,89,0.12)" }], 100, "100%");
   const netMax = Math.max(1024, ...netDownHist, ...netUpHist);
   drawGraph(
     document.getElementById("graph-net"),
@@ -767,12 +796,13 @@ function renderSnapshot(s) {
       { data: netDownHist, color: "#34c759", fill: "rgba(52,199,89,0.10)" },
       { data: netUpHist, color: "#0a63ce", fill: "rgba(10,99,206,0.10)" },
     ],
-    netMax
+    netMax,
+    fmtRate(netMax)
   );
 }
 
 // Canvas time-series renderer.
-function drawGraph(canvas, seriesList, yMax) {
+function drawGraph(canvas, seriesList, yMax, yLabel) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
@@ -823,6 +853,15 @@ function drawGraph(canvas, seriesList, yMax) {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
+
+  // Vertical-scale ceiling label (top-left).
+  if (yLabel) {
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.font = "10px -apple-system, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(yLabel, 4, 2);
+  }
 }
 
 function renderProcs() {
@@ -845,7 +884,7 @@ function renderProcs() {
     const tr = document.createElement("tr");
     const cpuCls = p.cpu >= 80 ? "cpu-veryhot" : p.cpu >= 30 ? "cpu-hot" : "";
     tr.innerHTML = `
-      <td>${p.pid}</td>
+      <td class="num">${p.pid}</td>
       <td>${escapeHtml(p.name)}</td>
       <td class="num ${cpuCls}">${p.cpu.toFixed(1)}</td>
       <td class="num">${fmtBytes(p.memory)}</td>
@@ -857,6 +896,11 @@ function renderProcs() {
       ev.stopPropagation();
       killProc(p);
     });
+    frag.appendChild(tr);
+  }
+  if (list.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="8" class="empty">No matching processes</td>';
     frag.appendChild(tr);
   }
   rows.appendChild(frag);
@@ -881,8 +925,9 @@ document.querySelectorAll(".proc-table th[data-psort]").forEach((th) => {
       procSortKey = key;
       procSortAsc = key === "name" || key === "status";
     }
-    document.querySelectorAll(".proc-table th").forEach((h) => h.classList.remove("active"));
+    document.querySelectorAll(".proc-table th").forEach((h) => h.classList.remove("active", "desc"));
     th.classList.add("active");
+    th.classList.toggle("desc", !procSortAsc);
     renderProcs();
   });
 });
