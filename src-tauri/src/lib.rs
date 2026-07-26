@@ -176,6 +176,13 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
     open_with(&["-R", "--", &path])
 }
 
+/// Move files/folders to the system Trash (recoverable, with Finder put-back),
+/// rather than deleting them outright.
+#[tauri::command]
+fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
+    trash::delete_all(&paths).map_err(|e| e.to_string())
+}
+
 fn open_with(args: &[&str]) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let program = "open";
@@ -595,6 +602,7 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // A second `scope <folder>` invocation: forward the path to the
             // already-running window instead of launching a new one.
@@ -627,6 +635,7 @@ pub fn run() {
             list_dir,
             open_path,
             reveal_in_finder,
+            move_to_trash,
             initial_path,
             read_text_preview,
             stat_path,

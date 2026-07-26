@@ -1,7 +1,7 @@
 // Scope frontend. Talks to the Rust backend via the global Tauri API
 // (enabled with `withGlobalTauri` in tauri.conf.json).
 
-const { invoke, convertFileSrc } = window.__TAURI__.core;
+const { invoke, convertFileSrc, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 // ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ function buildFavorites() {
   });
 }
 
-async function navigate(path, replace = false) {
+async function navigate(path, replace = false, selectPath = null) {
   let listing;
   try {
     listing = await invoke("list_dir", { path });
@@ -320,8 +320,9 @@ async function navigate(path, replace = false) {
   }
   currentDir = listing.path;
   currentEntries = listing.entries;
-  selectedPath = null;
-  selectedEntry = null;
+  // Optionally pre-select an entry (e.g. the folder we just came back/up from).
+  selectedEntry = selectPath ? currentEntries.find((e) => e.path === selectPath) || null : null;
+  selectedPath = selectedEntry ? selectedEntry.path : null;
 
   if (!replace) {
     history.splice(historyIndex + 1);
@@ -339,12 +340,30 @@ async function navigate(path, replace = false) {
   highlightFavorite();
 
   if (viewMode === "columns") {
-    columns = [{ path: currentDir, listing, selectedPath: null }];
+    columns = [{ path: currentDir, listing, selectedPath }];
     renderColumns();
   } else {
     renderFiles();
   }
-  clearPreview();
+  if (selectedEntry) {
+    showPreview(selectedEntry);
+    scrollSelectedIntoView();
+  } else {
+    clearPreview();
+  }
+}
+
+// The parent directory of a path, or "/" at the root.
+function parentOf(p) {
+  return (p || "/").replace(/\/[^/]+\/?$/, "") || "/";
+}
+
+function scrollSelectedIntoView() {
+  const el =
+    viewMode === "columns"
+      ? columnViewEl.querySelector(".mcol-item.selected")
+      : fileRows.querySelector("tr.selected");
+  if (el) el.scrollIntoView({ block: "nearest" });
 }
 
 function highlightFavorite() {
@@ -459,6 +478,13 @@ function renderFiles() {
       selectRowList(tr, e);
     });
     tr.addEventListener("dblclick", () => openEntry(e));
+    tr.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      selectRowList(tr, e);
+      openItemMenu(ev.clientX, ev.clientY, e);
+    });
+    tr.draggable = true;
+    tr.addEventListener("dragstart", (ev) => startFileDrag(ev, e));
     if (e.path === selectedPath) tr.classList.add("selected");
     attachThumb(tr.querySelector(".ico"), e);
     frag.appendChild(tr);
@@ -483,6 +509,81 @@ function openEntry(entry) {
   } else {
     invoke("open_path", { path: entry.path }).catch((e) => (finderStatus.textContent = `⚠ ${e}`));
   }
+}
+
+// ---- File actions: move to Trash, native drag-out, context menu ----
+
+async function trashEntry(entry) {
+  if (!entry) return;
+  try {
+    await invoke("move_to_trash", { paths: [entry.path] });
+  } catch (err) {
+    finderStatus.textContent = `⚠ ${err}`;
+    return;
+  }
+  removeEntryFromViews(entry.path);
+  finderStatus.textContent = `Moved "${entry.name}" to Trash`;
+}
+
+// Drop a just-trashed path from the in-memory listings and re-render, so we
+// don't need a full reload (which would collapse the column view).
+function removeEntryFromViews(path) {
+  currentEntries = currentEntries.filter((e) => e.path !== path);
+  // If the trashed item was an open folder, drop the columns beneath it.
+  const openIdx = columns.findIndex((c) => c.path === path);
+  if (openIdx > 0) columns = columns.slice(0, openIdx);
+  for (const col of columns) {
+    if (col.listing) col.listing.entries = col.listing.entries.filter((e) => e.path !== path);
+    if (col.selectedPath === path) col.selectedPath = null;
+  }
+  if (selectedPath === path) {
+    selectedPath = null;
+    selectedEntry = null;
+    clearPreview();
+  }
+  if (viewMode === "columns") renderColumns();
+  else renderFiles();
+}
+
+// A small canvas glyph used as the cursor image for the native drag.
+function dragImageDataUri(entry) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  ctx.font = "48px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(entry.is_dir ? "📁" : "📄", 32, 36);
+  return c.toDataURL("image/png");
+}
+
+// Hand off to a native OS drag so the file can be dropped into Finder, the
+// Desktop, the Trash, etc. Suppresses the webview's own (non-file) HTML5 drag.
+async function startFileDrag(ev, entry) {
+  ev.preventDefault();
+  try {
+    await invoke("plugin:drag|start_drag", {
+      item: [entry.path],
+      image: dragImageDataUri(entry),
+      options: null,
+      onEvent: new Channel(),
+    });
+  } catch (err) {
+    finderStatus.textContent = `⚠ ${err}`;
+  }
+}
+
+function openItemMenu(x, y, entry) {
+  const items = [
+    { label: "Open", onClick: () => openEntry(entry) },
+    {
+      label: "Reveal in Finder",
+      onClick: () => invoke("reveal_in_finder", { path: entry.path }).catch((e) => (finderStatus.textContent = `⚠ ${e}`)),
+    },
+    { type: "sep" },
+    { label: "Move to Trash", onClick: () => trashEntry(entry) },
+  ];
+  openMenu(x, y, items);
 }
 
 // ---- Column (Miller) view ----
@@ -543,6 +644,13 @@ function renderColumns() {
       item.addEventListener("dblclick", () => {
         if (!(e.is_dir && e.kind !== "Application")) openEntry(e);
       });
+      item.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        columnSelect(idx, e);
+        openItemMenu(ev.clientX, ev.clientY, e);
+      });
+      item.draggable = true;
+      item.addEventListener("dragstart", (ev) => startFileDrag(ev, e));
       attachThumb(item.querySelector(".ico"), e);
       colEl.appendChild(item);
     }
@@ -710,8 +818,11 @@ document.getElementById("view-columns").addEventListener("click", () => setViewM
 // Finder controls
 document.getElementById("nav-back").addEventListener("click", () => {
   if (historyIndex > 0) {
+    const from = history[historyIndex];
     historyIndex--;
-    navigate(history[historyIndex], "silent");
+    const to = history[historyIndex];
+    // Reselect the folder we came from if it lives in the dir we land on.
+    navigate(to, "silent", parentOf(from) === to ? from : null);
   }
 });
 document.getElementById("nav-forward").addEventListener("click", () => {
@@ -721,19 +832,25 @@ document.getElementById("nav-forward").addEventListener("click", () => {
   }
 });
 document.getElementById("nav-up").addEventListener("click", () => {
-  const parent = (currentDir || "/").replace(/\/[^/]+\/?$/, "") || "/";
-  navigate(parent);
+  const from = currentDir;
+  navigate(parentOf(from), false, from);
 });
 document.getElementById("nav-home").addEventListener("click", () => navigate(HOME));
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
 
-// Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
 document.addEventListener("keydown", (ev) => {
+  // Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
   if (ev.metaKey && ev.shiftKey && ev.code === "Period") {
     ev.preventDefault();
     hiddenShown = !hiddenShown;
     if (viewMode === "columns") renderColumns();
     else renderFiles();
+    return;
+  }
+  // ⌘⌫ moves the selected item to Trash (Finder shortcut).
+  if (ev.metaKey && ev.code === "Backspace" && selectedEntry && document.activeElement !== finderSearch) {
+    ev.preventDefault();
+    trashEntry(selectedEntry);
   }
 });
 

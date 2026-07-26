@@ -461,7 +461,8 @@ button:focus-visible {
   color: var(--text-dim);
 }
 .filelist td {
-  padding: 6px 10px;
+  padding: 3px 10px;
+  font-size: 11px;
   border-bottom: 1px solid var(--line-soft);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -493,21 +494,21 @@ button:focus-visible {
 .name-cell {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
 }
 .ico {
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1;
 }
 .ico img.thumb {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   object-fit: contain;
   border-radius: 3px;
   display: block;
@@ -548,8 +549,9 @@ button:focus-visible {
 .mcol-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: 7px;
+  padding: 3px 8px;
+  font-size: 11px;
   border-radius: 6px;
   cursor: default;
   white-space: nowrap;
