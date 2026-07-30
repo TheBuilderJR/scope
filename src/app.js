@@ -572,6 +572,20 @@ function renderFiles() {
   finderStatus.textContent = `${list.length} items · ${folders} folders · ${list.length - folders} files`;
 }
 
+// The paths of the rows actually rendered, in visible order. This is the
+// source of truth for range selection — sortedFiltered() can disagree with the
+// screen while folder sizes stream in and mutate the sort key mid-flight.
+function displayedPaths() {
+  return Array.from(fileRows.querySelectorAll("tr")).map((tr) => tr.dataset.path);
+}
+
+function displayedEntries() {
+  const byPath = new Map(currentEntries.map((e) => [e.path, e]));
+  return displayedPaths()
+    .map((p) => byPath.get(p))
+    .filter(Boolean);
+}
+
 // Handle a list-row click, honouring ⌘ (toggle) and ⇧ (range) like Finder.
 function handleRowClick(entry, ev) {
   if (ev.metaKey) {
@@ -579,7 +593,7 @@ function handleRowClick(entry, ev) {
     else selectedPaths.add(entry.path);
     selectAnchor = entry.path;
   } else if (ev.shiftKey && selectAnchor) {
-    const paths = sortedFiltered().map((e) => e.path);
+    const paths = displayedPaths();
     const a = paths.indexOf(selectAnchor);
     const b = paths.indexOf(entry.path);
     if (a !== -1 && b !== -1) {
@@ -615,7 +629,7 @@ function updatePrimary(clicked) {
     selectedEntry = clicked;
     return;
   }
-  const remaining = sortedFiltered().filter((e) => selectedPaths.has(e.path));
+  const remaining = displayedEntries().filter((e) => selectedPaths.has(e.path));
   selectedEntry = remaining.length ? remaining[remaining.length - 1] : null;
   selectedPath = selectedEntry ? selectedEntry.path : null;
 }
@@ -1008,7 +1022,7 @@ document.addEventListener("keydown", (ev) => {
   // ⌘A selects everything in the list view.
   if (ev.metaKey && ev.code === "KeyA" && viewMode === "list" && document.activeElement !== finderSearch) {
     ev.preventDefault();
-    const order = sortedFiltered();
+    const order = displayedEntries();
     if (order.length) {
       selectedPaths = new Set(order.map((e) => e.path));
       selectAnchor = order[0].path;
