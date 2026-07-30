@@ -248,6 +248,7 @@ let visibleCols = loadPref("scope.visibleCols", {
   created: false,
 });
 let mcolWidth = loadPref("scope.mcolWidth", 230); // Miller column width (px)
+let calcFolderSizes = loadPref("scope.calcFolderSizes", true); // recursive folder sizes
 
 function loadPref(key, fallback) {
   try {
@@ -455,6 +456,58 @@ function sortedFiltered() {
   return filterEntries(currentEntries).sort(compareEntries);
 }
 
+// ---- Recursive folder sizes (Finder's "Calculate all sizes") ----
+// Computed lazily in the background so the listing renders immediately. Cache
+// values: undefined/"pending" = not ready, number = bytes, null = failed.
+const folderSizeCache = new Map(); // path -> bytes | null | "pending"
+const sizeWaiting = [];
+let sizeActive = 0;
+const SIZE_MAX = 4; // concurrent dir_size walks
+
+function sizeCellText(e) {
+  if (!e.is_dir) return fmtBytes(e.size);
+  if (!calcFolderSizes) return "—";
+  const c = folderSizeCache.get(e.path);
+  if (c === undefined || c === "pending") return "…";
+  return c == null ? "—" : fmtBytes(c);
+}
+
+function maybeQueueFolderSize(path) {
+  if (folderSizeCache.has(path)) return; // done or already pending
+  folderSizeCache.set(path, "pending");
+  sizeWaiting.push(path);
+  pumpSizes();
+}
+
+function pumpSizes() {
+  while (sizeActive < SIZE_MAX && sizeWaiting.length) {
+    const path = sizeWaiting.shift();
+    sizeActive++;
+    invoke("dir_size", { path })
+      .then((bytes) => {
+        folderSizeCache.set(path, bytes);
+        // Keep the entry's size in sync so sorting by Size uses the real total.
+        const ent = currentEntries.find((e) => e.path === path);
+        if (ent) ent.size = bytes;
+        updateSizeCell(path, fmtBytes(bytes));
+      })
+      .catch(() => {
+        folderSizeCache.set(path, null);
+        updateSizeCell(path, "—");
+      })
+      .finally(() => {
+        sizeActive--;
+        pumpSizes();
+      });
+  }
+}
+
+function updateSizeCell(path, text) {
+  const row = fileRows.querySelector(`tr[data-path="${CSS.escape(path)}"]`);
+  const cell = row && row.querySelector("td.size");
+  if (cell) cell.textContent = text;
+}
+
 function renderFiles() {
   const list = sortedFiltered();
   thumbObserver.disconnect();
@@ -470,7 +523,7 @@ function renderFiles() {
       <td><div class="name-cell"><span class="ico">${iconFor(e)}</span><span class="txt">${escapeHtml(e.name)}${
       e.is_symlink ? " ↪" : ""
     }</span></div></td>
-      <td class="size">${e.is_dir ? "—" : fmtBytes(e.size)}</td>
+      <td class="size">${sizeCellText(e)}</td>
       <td class="kind">${e.kind}</td>
       <td class="date">${fmtDate(e.modified)}</td>
       <td class="date date-created">${fmtDate(e.created)}</td>`;
@@ -487,6 +540,7 @@ function renderFiles() {
     tr.addEventListener("dragstart", (ev) => startFileDrag(ev, e));
     if (e.path === selectedPath) tr.classList.add("selected");
     attachThumb(tr.querySelector(".ico"), e);
+    if (e.is_dir && calcFolderSizes) maybeQueueFolderSize(e.path);
     frag.appendChild(tr);
   }
   fileRows.appendChild(frag);
@@ -903,6 +957,12 @@ function setFoldersOnTop(on) {
   else renderFiles();
 }
 
+function toggleCalcFolderSizes() {
+  calcFolderSizes = !calcFolderSizes;
+  savePref("scope.calcFolderSizes", calcFolderSizes);
+  renderFiles(); // re-render queues size walks (or reverts folders to "—")
+}
+
 document.querySelectorAll(".filelist th[data-sort]").forEach((th) => {
   th.addEventListener("click", () => applySort(th.dataset.sort));
 });
@@ -1003,6 +1063,7 @@ listViewEl.querySelector("thead").addEventListener("contextmenu", (e) => {
     }),
     { type: "sep" },
     { label: "Keep Folders on Top", checked: foldersOnTop, onClick: () => setFoldersOnTop(!foldersOnTop) },
+    { label: "Calculate Folder Sizes", checked: calcFolderSizes, onClick: toggleCalcFolderSizes },
   ]);
 });
 

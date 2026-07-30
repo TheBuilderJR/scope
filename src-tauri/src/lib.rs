@@ -183,6 +183,35 @@ fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
     trash::delete_all(&paths).map_err(|e| e.to_string())
 }
 
+/// Recursively sum the on-disk size of a directory's contents (like Finder's
+/// "Calculate all sizes"). Symlinks are not followed, to avoid cycles and
+/// double-counting. Runs on a blocking thread since it walks the whole subtree.
+#[tauri::command]
+async fn dir_size(path: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || dir_size_walk(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn dir_size_walk(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    for entry in rd.flatten() {
+        // file_type()/metadata() on a DirEntry do not follow symlinks.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        } else if ft.is_dir() {
+            total = total.saturating_add(dir_size_walk(&entry.path()));
+        } else if let Ok(m) = entry.metadata() {
+            total = total.saturating_add(m.len());
+        }
+    }
+    total
+}
+
 fn open_with(args: &[&str]) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let program = "open";
@@ -636,6 +665,7 @@ pub fn run() {
             open_path,
             reveal_in_finder,
             move_to_trash,
+            dir_size,
             initial_path,
             read_text_preview,
             stat_path,
