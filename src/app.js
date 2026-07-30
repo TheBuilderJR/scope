@@ -235,8 +235,10 @@ let viewMode = "list"; // "list" | "columns"
 let hiddenShown = false; // toggled with ⌘⇧. like Finder
 let currentDir = null;
 let currentEntries = [];
-let selectedPath = null;
+let selectedPath = null; // primary (last-clicked) selection, drives the preview
 let selectedEntry = null;
+let selectedPaths = new Set(); // full multi-selection (list view)
+let selectAnchor = null; // range anchor for shift-click
 let sortKey = loadPref("scope.sortKey", "name");
 let sortAsc = loadPref("scope.sortAsc", true);
 // Finder-style view options, persisted across launches.
@@ -324,6 +326,8 @@ async function navigate(path, replace = false, selectPath = null) {
   // Optionally pre-select an entry (e.g. the folder we just came back/up from).
   selectedEntry = selectPath ? currentEntries.find((e) => e.path === selectPath) || null : null;
   selectedPath = selectedEntry ? selectedEntry.path : null;
+  selectedPaths = selectedPath ? new Set([selectedPath]) : new Set();
+  selectAnchor = selectedPath;
 
   if (!replace) {
     history.splice(historyIndex + 1);
@@ -490,6 +494,9 @@ function pumpSizes() {
         const ent = currentEntries.find((e) => e.path === path);
         if (ent) ent.size = bytes;
         updateSizeCell(path, fmtBytes(bytes));
+        // If the list is sorted by size, the newly-known total changes the
+        // order — re-sort (debounced) once these stream in.
+        if (sortKey === "size" && viewMode === "list") scheduleSizeResort();
       })
       .catch(() => {
         folderSizeCache.set(path, null);
@@ -506,6 +513,20 @@ function updateSizeCell(path, text) {
   const row = fileRows.querySelector(`tr[data-path="${CSS.escape(path)}"]`);
   const cell = row && row.querySelector("td.size");
   if (cell) cell.textContent = text;
+}
+
+// Debounced re-sort while folder sizes stream in (only when sorting by Size).
+// Preserves the scroll position so the list doesn't jump to the top.
+let sizeResortTimer = null;
+function scheduleSizeResort() {
+  if (sizeResortTimer) return;
+  sizeResortTimer = setTimeout(() => {
+    sizeResortTimer = null;
+    if (sortKey !== "size" || viewMode !== "list") return;
+    const top = listViewEl.scrollTop;
+    renderFiles();
+    listViewEl.scrollTop = top;
+  }, 250);
 }
 
 function renderFiles() {
@@ -527,20 +548,22 @@ function renderFiles() {
       <td class="kind">${e.kind}</td>
       <td class="date">${fmtDate(e.modified)}</td>
       <td class="date date-created">${fmtDate(e.created)}</td>`;
-    tr.addEventListener("click", () => {
-      selectRowList(tr, e);
-    });
+    tr.addEventListener("click", (ev) => handleRowClick(e, ev));
     tr.addEventListener("dblclick", () => openEntry(e));
     tr.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
-      selectRowList(tr, e);
+      if (!selectedPaths.has(e.path)) selectSingle(e);
       openItemMenu(ev.clientX, ev.clientY, e);
     });
     tr.draggable = true;
     tr.addEventListener("dragstart", (ev) => startFileDrag(ev, e));
-    if (e.path === selectedPath) tr.classList.add("selected");
+    if (selectedPaths.has(e.path)) tr.classList.add("selected");
     attachThumb(tr.querySelector(".ico"), e);
-    if (e.is_dir && calcFolderSizes) maybeQueueFolderSize(e.path);
+    if (e.is_dir && calcFolderSizes) {
+      const c = folderSizeCache.get(e.path);
+      if (typeof c === "number") e.size = c; // keep sort in sync with the shown size
+      else maybeQueueFolderSize(e.path);
+    }
     frag.appendChild(tr);
   }
   fileRows.appendChild(frag);
@@ -549,12 +572,84 @@ function renderFiles() {
   finderStatus.textContent = `${list.length} items · ${folders} folders · ${list.length - folders} files`;
 }
 
-function selectRowList(tr, entry) {
-  fileRows.querySelectorAll("tr.selected").forEach((r) => r.classList.remove("selected"));
-  tr.classList.add("selected");
-  selectedPath = entry.path;
-  selectedEntry = entry;
-  showPreview(entry);
+// Handle a list-row click, honouring ⌘ (toggle) and ⇧ (range) like Finder.
+function handleRowClick(entry, ev) {
+  if (ev.metaKey) {
+    if (selectedPaths.has(entry.path)) selectedPaths.delete(entry.path);
+    else selectedPaths.add(entry.path);
+    selectAnchor = entry.path;
+  } else if (ev.shiftKey && selectAnchor) {
+    const paths = sortedFiltered().map((e) => e.path);
+    const a = paths.indexOf(selectAnchor);
+    const b = paths.indexOf(entry.path);
+    if (a !== -1 && b !== -1) {
+      const [lo, hi] = a <= b ? [a, b] : [b, a];
+      selectedPaths = new Set(paths.slice(lo, hi + 1));
+    } else {
+      selectedPaths = new Set([entry.path]);
+    }
+    // anchor stays put so further shift-clicks re-extend from the same origin
+  } else {
+    selectedPaths = new Set([entry.path]);
+    selectAnchor = entry.path;
+  }
+  updatePrimary(entry);
+  refreshRowSelectionClasses();
+  updateSelectionPreview();
+}
+
+// Select exactly one entry (used by right-click on an unselected row, drag).
+function selectSingle(entry) {
+  selectedPaths = new Set([entry.path]);
+  selectAnchor = entry.path;
+  updatePrimary(entry);
+  refreshRowSelectionClasses();
+  updateSelectionPreview();
+}
+
+// The primary selection drives the preview + single-item ops. Prefer the
+// clicked entry when it's still selected, else the last one in display order.
+function updatePrimary(clicked) {
+  if (selectedPaths.has(clicked.path)) {
+    selectedPath = clicked.path;
+    selectedEntry = clicked;
+    return;
+  }
+  const remaining = sortedFiltered().filter((e) => selectedPaths.has(e.path));
+  selectedEntry = remaining.length ? remaining[remaining.length - 1] : null;
+  selectedPath = selectedEntry ? selectedEntry.path : null;
+}
+
+function refreshRowSelectionClasses() {
+  fileRows.querySelectorAll("tr").forEach((tr) => {
+    tr.classList.toggle("selected", selectedPaths.has(tr.dataset.path));
+  });
+}
+
+function updateSelectionPreview() {
+  if (selectedPaths.size > 1) showMultiPreview();
+  else if (selectedEntry) showPreview(selectedEntry);
+  else clearPreview();
+}
+
+// Summary preview for a multi-selection: count + combined size.
+function showMultiPreview() {
+  const sel = currentEntries.filter((e) => selectedPaths.has(e.path));
+  let total = 0;
+  let approx = false;
+  for (const e of sel) {
+    if (e.is_dir) {
+      const c = folderSizeCache.get(e.path);
+      if (typeof c === "number") total += c;
+      else approx = true; // folder size not computed yet
+    } else {
+      total += e.size;
+    }
+  }
+  previewEl.innerHTML = `
+    <div class="pv-bigicon">🗂️</div>
+    <div class="pv-name">${sel.length} items selected</div>
+    <div class="pv-kind">${fmtBytes(total)}${approx ? "+" : ""}</div>`;
 }
 
 function openEntry(entry) {
@@ -567,36 +662,36 @@ function openEntry(entry) {
 
 // ---- File actions: move to Trash, native drag-out, context menu ----
 
-async function trashEntry(entry) {
-  if (!entry) return;
+// Move one or more paths to Trash, then prune them from the in-memory listings
+// and re-render (no full reload, which would collapse the column view).
+async function trashPaths(paths) {
+  paths = [...new Set(paths)].filter(Boolean);
+  if (!paths.length) return;
   try {
-    await invoke("move_to_trash", { paths: [entry.path] });
+    await invoke("move_to_trash", { paths });
   } catch (err) {
     finderStatus.textContent = `⚠ ${err}`;
     return;
   }
-  removeEntryFromViews(entry.path);
-  finderStatus.textContent = `Moved "${entry.name}" to Trash`;
-}
-
-// Drop a just-trashed path from the in-memory listings and re-render, so we
-// don't need a full reload (which would collapse the column view).
-function removeEntryFromViews(path) {
-  currentEntries = currentEntries.filter((e) => e.path !== path);
-  // If the trashed item was an open folder, drop the columns beneath it.
-  const openIdx = columns.findIndex((c) => c.path === path);
-  if (openIdx > 0) columns = columns.slice(0, openIdx);
-  for (const col of columns) {
-    if (col.listing) col.listing.entries = col.listing.entries.filter((e) => e.path !== path);
-    if (col.selectedPath === path) col.selectedPath = null;
+  for (const path of paths) {
+    currentEntries = currentEntries.filter((e) => e.path !== path);
+    selectedPaths.delete(path);
+    // If a trashed item was an open folder, drop the columns beneath it.
+    const openIdx = columns.findIndex((c) => c.path === path);
+    if (openIdx > 0) columns = columns.slice(0, openIdx);
+    for (const col of columns) {
+      if (col.listing) col.listing.entries = col.listing.entries.filter((e) => e.path !== path);
+      if (col.selectedPath === path) col.selectedPath = null;
+    }
   }
-  if (selectedPath === path) {
+  if (selectedPath && !currentEntries.some((e) => e.path === selectedPath)) {
     selectedPath = null;
     selectedEntry = null;
-    clearPreview();
   }
   if (viewMode === "columns") renderColumns();
   else renderFiles();
+  updateSelectionPreview();
+  finderStatus.textContent = `Moved ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash`;
 }
 
 // A small canvas glyph used as the cursor image for the native drag.
@@ -615,9 +710,11 @@ function dragImageDataUri(entry) {
 // Desktop, the Trash, etc. Suppresses the webview's own (non-file) HTML5 drag.
 async function startFileDrag(ev, entry) {
   ev.preventDefault();
+  // Drag the whole selection when the grabbed item is part of it, else just it.
+  const paths = selectedPaths.has(entry.path) && selectedPaths.size > 1 ? [...selectedPaths] : [entry.path];
   try {
     await invoke("plugin:drag|start_drag", {
-      item: [entry.path],
+      item: paths,
       image: dragImageDataUri(entry),
       options: null,
       onEvent: new Channel(),
@@ -628,6 +725,8 @@ async function startFileDrag(ev, entry) {
 }
 
 function openItemMenu(x, y, entry) {
+  const paths = selectedPaths.has(entry.path) ? [...selectedPaths] : [entry.path];
+  const multi = paths.length > 1;
   const items = [
     { label: "Open", onClick: () => openEntry(entry) },
     {
@@ -635,7 +734,7 @@ function openItemMenu(x, y, entry) {
       onClick: () => invoke("reveal_in_finder", { path: entry.path }).catch((e) => (finderStatus.textContent = `⚠ ${e}`)),
     },
     { type: "sep" },
-    { label: "Move to Trash", onClick: () => trashEntry(entry) },
+    { label: multi ? `Move ${paths.length} Items to Trash` : "Move to Trash", onClick: () => trashPaths(paths) },
   ];
   openMenu(x, y, items);
 }
@@ -901,10 +1000,22 @@ document.addEventListener("keydown", (ev) => {
     else renderFiles();
     return;
   }
-  // ⌘⌫ moves the selected item to Trash (Finder shortcut).
-  if (ev.metaKey && ev.code === "Backspace" && selectedEntry && document.activeElement !== finderSearch) {
+  // ⌘⌫ moves the selection to Trash (Finder shortcut).
+  if (ev.metaKey && ev.code === "Backspace" && selectedPaths.size && document.activeElement !== finderSearch) {
     ev.preventDefault();
-    trashEntry(selectedEntry);
+    trashPaths([...selectedPaths]);
+  }
+  // ⌘A selects everything in the list view.
+  if (ev.metaKey && ev.code === "KeyA" && viewMode === "list" && document.activeElement !== finderSearch) {
+    ev.preventDefault();
+    const order = sortedFiltered();
+    if (order.length) {
+      selectedPaths = new Set(order.map((e) => e.path));
+      selectAnchor = order[0].path;
+      updatePrimary(order[order.length - 1]);
+      refreshRowSelectionClasses();
+      updateSelectionPreview();
+    }
   }
 });
 
