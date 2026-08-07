@@ -472,6 +472,17 @@ function compareEntries(a, b) {
 // ---- List view ----
 
 function sortedFiltered() {
+  // list_dir returns directories with a placeholder size. When revisiting a
+  // folder (including via Back), hydrate those fresh entries from the recursive
+  // size cache before sorting; doing this later while rendering leaves the rows
+  // in placeholder-size order even though their cells show the cached totals.
+  if (calcFolderSizes) {
+    for (const entry of currentEntries) {
+      if (!entry.is_dir) continue;
+      const cached = folderSizeCache.get(entry.path);
+      if (typeof cached === "number") entry.size = cached;
+    }
+  }
   return filterEntries(currentEntries).sort(compareEntries);
 }
 
