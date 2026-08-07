@@ -742,7 +742,9 @@ async function trashPaths(paths) {
   if (viewMode === "columns") renderColumns();
   else renderFiles();
   updateSelectionPreview();
-  finderStatus.textContent = `Moving ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash…`;
+  // Treat the action as complete from the user's perspective. The native move
+  // continues on a worker thread and rolls the entries back if it later fails.
+  finderStatus.textContent = `Moved ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash`;
 
   try {
     await invoke("move_to_trash", { paths });
@@ -765,11 +767,8 @@ async function trashPaths(paths) {
     if (viewMode === "columns") renderColumns();
     else renderFiles();
     updateSelectionPreview();
-    finderStatus.textContent = `⚠ ${err}`;
+    if (revision === trashRevision) finderStatus.textContent = `⚠ ${err}`;
     return;
-  }
-  if (revision === trashRevision) {
-    finderStatus.textContent = `Moved ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash`;
   }
 }
 

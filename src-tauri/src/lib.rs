@@ -177,10 +177,16 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 }
 
 /// Move files/folders to the system Trash (recoverable, with Finder put-back),
-/// rather than deleting them outright.
+/// rather than deleting them outright. macOS may block this call while Trash
+/// is being emptied, so keep it off Tauri's command thread to avoid freezing
+/// the app while the optimistic frontend remains interactive.
 #[tauri::command]
-fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
-    trash::delete_all(&paths).map_err(|e| e.to_string())
+async fn move_to_trash(paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        trash::delete_all(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Recursively sum the on-disk size of a directory's contents (like Finder's
