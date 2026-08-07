@@ -275,9 +275,23 @@ function savePref(key, value) {
   }
 }
 let columns = []; // [{ path, listing, selectedPath }]
-const history = [];
+// Each history entry snapshots the active sort so Back/Forward restores the
+// directory exactly as it was viewed, rather than inheriting another folder's
+// later sort choice.
+const history = []; // [{ path, sortKey, sortAsc }]
 let historyIndex = -1;
 let HOME = "/";
+
+function historyEntry(path) {
+  return { path, sortKey, sortAsc };
+}
+
+function restoreHistorySort(entry) {
+  if (!entry) return;
+  sortKey = entry.sortKey;
+  sortAsc = entry.sortAsc;
+  updateSortHeaderUI();
+}
 
 async function initFinder() {
   HOME = await invoke("home_dir");
@@ -313,7 +327,7 @@ function buildFavorites() {
   });
 }
 
-async function navigate(path, replace = false, selectPath = null) {
+async function navigate(path, replace = false, selectPath = null, savedHistoryEntry = null) {
   let listing;
   try {
     listing = await invoke("list_dir", { path });
@@ -321,6 +335,7 @@ async function navigate(path, replace = false, selectPath = null) {
     finderStatus.textContent = `⚠ ${e}`;
     return;
   }
+  restoreHistorySort(savedHistoryEntry);
   currentDir = listing.path;
   currentEntries = listing.entries;
   // Optionally pre-select an entry (e.g. the folder we just came back/up from).
@@ -331,13 +346,13 @@ async function navigate(path, replace = false, selectPath = null) {
 
   if (!replace) {
     history.splice(historyIndex + 1);
-    history.push(currentDir);
+    history.push(historyEntry(currentDir));
     historyIndex = history.length - 1;
   } else if (historyIndex < 0) {
-    history.push(currentDir);
+    history.push(historyEntry(currentDir));
     historyIndex = 0;
   } else {
-    history[historyIndex] = currentDir;
+    history[historyIndex] = historyEntry(currentDir);
   }
 
   updateNavButtons();
@@ -676,36 +691,75 @@ function openEntry(entry) {
 
 // ---- File actions: move to Trash, native drag-out, context menu ----
 
-// Move one or more paths to Trash, then prune them from the in-memory listings
-// and re-render (no full reload, which would collapse the column view).
+// Move one or more paths to Trash. Prune the in-memory state and render first
+// so the UI responds immediately; if the native operation fails, put the
+// removed entries back into any still-visible listings without clobbering
+// navigation or selection changes made while the operation was in flight.
+let trashRevision = 0;
 async function trashPaths(paths) {
   paths = [...new Set(paths)].filter(Boolean);
   if (!paths.length) return;
-  try {
-    await invoke("move_to_trash", { paths });
-  } catch (err) {
-    finderStatus.textContent = `⚠ ${err}`;
-    return;
-  }
-  for (const path of paths) {
-    currentEntries = currentEntries.filter((e) => e.path !== path);
-    selectedPaths.delete(path);
-    // If a trashed item was an open folder, drop the columns beneath it.
-    const openIdx = columns.findIndex((c) => c.path === path);
-    if (openIdx > 0) columns = columns.slice(0, openIdx);
-    for (const col of columns) {
-      if (col.listing) col.listing.entries = col.listing.entries.filter((e) => e.path !== path);
-      if (col.selectedPath === path) col.selectedPath = null;
-    }
-  }
-  if (selectedPath && !currentEntries.some((e) => e.path === selectedPath)) {
+
+  const revision = ++trashRevision;
+  const removed = new Set(paths);
+  const originDir = currentDir;
+  const removedCurrentEntries = currentEntries.filter((e) => removed.has(e.path));
+  const removedColumnEntries = new Map(
+    columns.map((col) => [col.path, col.listing ? col.listing.entries.filter((e) => removed.has(e.path)) : []])
+  );
+
+  currentEntries = currentEntries.filter((e) => !removed.has(e.path));
+  columns = columns.map((col) => ({
+    ...col,
+    listing: col.listing
+      ? { ...col.listing, entries: col.listing.entries.filter((e) => !removed.has(e.path)) }
+      : col.listing,
+    selectedPath: removed.has(col.selectedPath) ? null : col.selectedPath,
+  }));
+  // If an open folder itself is being trashed, hide its descendant columns
+  // immediately too.
+  const openIdx = columns.findIndex((c) => removed.has(c.path));
+  if (openIdx > 0) columns = columns.slice(0, openIdx);
+
+  selectedPaths = new Set([...selectedPaths].filter((path) => !removed.has(path)));
+  if (removed.has(selectedPath)) {
     selectedPath = null;
     selectedEntry = null;
   }
+  if (removed.has(selectAnchor)) selectAnchor = null;
+
   if (viewMode === "columns") renderColumns();
   else renderFiles();
   updateSelectionPreview();
-  finderStatus.textContent = `Moved ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash`;
+  finderStatus.textContent = `Moving ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash…`;
+
+  try {
+    await invoke("move_to_trash", { paths });
+  } catch (err) {
+    // Restore only this operation's entries. Other trash operations or user
+    // interactions that happened in the meantime remain untouched.
+    if (currentDir === originDir && removedCurrentEntries.length) {
+      const present = new Set(currentEntries.map((e) => e.path));
+      currentEntries = currentEntries.concat(removedCurrentEntries.filter((e) => !present.has(e.path)));
+    }
+    columns = columns.map((col) => {
+      const restore = removedColumnEntries.get(col.path) || [];
+      if (!restore.length) return col;
+      const present = new Set(col.listing.entries.map((e) => e.path));
+      return {
+        ...col,
+        listing: { ...col.listing, entries: col.listing.entries.concat(restore.filter((e) => !present.has(e.path))) },
+      };
+    });
+    if (viewMode === "columns") renderColumns();
+    else renderFiles();
+    updateSelectionPreview();
+    finderStatus.textContent = `⚠ ${err}`;
+    return;
+  }
+  if (revision === trashRevision) {
+    finderStatus.textContent = `Moved ${paths.length} item${paths.length > 1 ? "s" : ""} to Trash`;
+  }
 }
 
 // A small canvas glyph used as the cursor image for the native drag.
@@ -985,17 +1039,19 @@ document.getElementById("view-columns").addEventListener("click", () => setViewM
 // Finder controls
 document.getElementById("nav-back").addEventListener("click", () => {
   if (historyIndex > 0) {
-    const from = history[historyIndex];
+    const from = history[historyIndex].path;
     historyIndex--;
-    const to = history[historyIndex];
+    const target = history[historyIndex];
+    const to = target.path;
     // Reselect the folder we came from if it lives in the dir we land on.
-    navigate(to, "silent", parentOf(from) === to ? from : null);
+    navigate(to, "silent", parentOf(from) === to ? from : null, target);
   }
 });
 document.getElementById("nav-forward").addEventListener("click", () => {
   if (historyIndex < history.length - 1) {
     historyIndex++;
-    navigate(history[historyIndex], "silent");
+    const target = history[historyIndex];
+    navigate(target.path, "silent", null, target);
   }
 });
 document.getElementById("nav-up").addEventListener("click", () => {
@@ -1070,6 +1126,9 @@ function applySort(key) {
   }
   savePref("scope.sortKey", sortKey);
   savePref("scope.sortAsc", sortAsc);
+  if (historyIndex >= 0 && history[historyIndex]?.path === currentDir) {
+    history[historyIndex] = historyEntry(currentDir);
+  }
   updateSortHeaderUI();
   if (viewMode === "columns") renderColumns();
   else renderFiles();
