@@ -212,7 +212,7 @@ function switchView(name) {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === name));
   Object.entries(views).forEach(([k, el]) => el.classList.toggle("active", k === name));
   if (name === "monitor") {
-    pollMonitor();
+    startMonitorPolling();
     drawAllGraphs();
   }
 }
@@ -294,9 +294,11 @@ function restoreHistorySort(entry) {
 }
 
 async function initFinder() {
-  HOME = await invoke("home_dir");
+  // These are independent, so avoid paying two serial IPC round trips before
+  // the first directory can render.
+  const [home, initial] = await Promise.all([invoke("home_dir"), invoke("initial_path")]);
+  HOME = home;
   buildFavorites();
-  const initial = await invoke("initial_path");
   await navigate(initial || HOME, true);
 }
 
@@ -509,6 +511,21 @@ function maybeQueueFolderSize(path) {
   pumpSizes();
 }
 
+// Recursive size walks can be expensive for top-level folders. Start them
+// only after the current listing has had a chance to paint, and abandon a
+// deferred batch if the user has already navigated elsewhere.
+function queueFolderSizesAfterPaint(paths, renderedDir) {
+  if (!paths.length) return;
+  requestAnimationFrame(() => {
+    const run = () => {
+      if (currentDir !== renderedDir || viewMode !== "list") return;
+      paths.forEach(maybeQueueFolderSize);
+    };
+    if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 400 });
+    else setTimeout(run, 40);
+  });
+}
+
 function pumpSizes() {
   while (sizeActive < SIZE_MAX && sizeWaiting.length) {
     const path = sizeWaiting.shift();
@@ -557,6 +574,7 @@ function scheduleSizeResort() {
 
 function renderFiles() {
   const list = sortedFiltered();
+  const foldersToMeasure = [];
   thumbObserver.disconnect();
   fileRows.innerHTML = "";
   finderEmpty.classList.toggle("hidden", list.length > 0);
@@ -588,11 +606,12 @@ function renderFiles() {
     if (e.is_dir && calcFolderSizes) {
       const c = folderSizeCache.get(e.path);
       if (typeof c === "number") e.size = c; // keep sort in sync with the shown size
-      else maybeQueueFolderSize(e.path);
+      else foldersToMeasure.push(e.path);
     }
     frag.appendChild(tr);
   }
   fileRows.appendChild(frag);
+  queueFolderSizesAfterPaint(foldersToMeasure, currentDir);
 
   const folders = list.filter((e) => e.is_dir).length;
   finderStatus.textContent = `${list.length} items · ${folders} folders · ${list.length - folders} files`;
@@ -1285,6 +1304,15 @@ let lastProcs = [];
 
 // Time-series history: one timestamped sample per poll, kept for MAX_WINDOW_MS.
 const hist = []; // { t, cpu, mem, down, up }
+let monitorTimer = null;
+
+// Monitoring is intentionally lazy: sysinfo's initial process/CPU/network
+// refresh is substantial and should not delay a Finder-only launch.
+function startMonitorPolling() {
+  if (monitorTimer) return;
+  pollMonitor();
+  monitorTimer = setInterval(pollMonitor, POLL_MS);
+}
 
 // Record a sample on every poll (even when the Monitor tab isn't visible) so
 // longer windows fill in. Returns the derived rates for the current readout.
@@ -1321,6 +1349,10 @@ async function pollMonitor() {
   if (!document.getElementById("proc-pause").checked) {
     try {
       lastProcs = await invoke("process_list");
+      // The lazily-created System starts without a process table; reflect the
+      // first process refresh immediately instead of showing zero until the
+      // next snapshot tick.
+      document.getElementById("proc-count").textContent = lastProcs.length;
       renderProcs();
     } catch (e) {
       console.error(e);
@@ -1599,8 +1631,6 @@ document.querySelectorAll("#window-selector .win").forEach((b) => {
     drawAllGraphs();
   });
 });
-
-setInterval(pollMonitor, POLL_MS);
 
 // ===========================================================================
 // Resizable table columns (Finder list + process table)

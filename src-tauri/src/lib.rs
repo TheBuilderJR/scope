@@ -110,29 +110,34 @@ fn list_dir(path: String) -> Result<DirListing, String> {
     for item in read.flatten() {
         let p = item.path();
         let name = item.file_name().to_string_lossy().to_string();
-        // Use symlink_metadata so we can flag symlinks, but fall back to
-        // metadata (following the link) for the is_dir / size determination.
+        // DirEntry::metadata does not follow symlinks. Reuse it for ordinary
+        // entries so the initial listing pays for one metadata syscall rather
+        // than two; only symlinks need a second, following lookup.
         let sym_meta = item.metadata().ok();
         let is_symlink = sym_meta
             .as_ref()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
-        let follow_meta = std::fs::metadata(&p).ok();
-        let is_dir = follow_meta
+        let meta = if is_symlink {
+            std::fs::metadata(&p).ok()
+        } else {
+            sym_meta
+        };
+        let is_dir = meta
             .as_ref()
             .map(|m| m.is_dir())
             .unwrap_or_else(|| p.is_dir());
         let size = if is_dir {
             0
         } else {
-            follow_meta.as_ref().map(|m| m.len()).unwrap_or(0)
+            meta.as_ref().map(|m| m.len()).unwrap_or(0)
         };
-        let modified = follow_meta
+        let modified = meta
             .as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
-        let created = follow_meta
+        let created = meta
             .as_ref()
             .and_then(|m| m.created().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -631,8 +636,10 @@ fn parse_path_arg(argv: &[String]) -> Option<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = AppState {
-        sys: Mutex::new(System::new_all()),
-        networks: Mutex::new(Networks::new_with_refreshed_list()),
+        // Keep launch cheap. CPU, memory, processes, and network interfaces are
+        // populated lazily when the user first opens the Monitor tab.
+        sys: Mutex::new(System::new()),
+        networks: Mutex::new(Networks::new()),
         initial_path: Mutex::new(None),
     };
 
@@ -652,12 +659,6 @@ pub fn run() {
         }))
         .manage(state)
         .setup(|app| {
-            // Prime the CPU counters so the first snapshot isn't all zeros.
-            {
-                let state = app.state::<AppState>();
-                let mut sys = state.sys.lock().unwrap();
-                sys.refresh_cpu_all();
-            }
             // Record any folder passed on the command line at first launch.
             let args: Vec<String> = std::env::args().collect();
             if let Some(path) = parse_path_arg(&args) {
