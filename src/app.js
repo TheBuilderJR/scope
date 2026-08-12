@@ -275,15 +275,35 @@ function savePref(key, value) {
   }
 }
 let columns = []; // [{ path, listing, selectedPath }]
-// Each history entry snapshots the active sort so Back/Forward restores the
-// directory exactly as it was viewed, rather than inheriting another folder's
-// later sort choice.
-const history = []; // [{ path, sortKey, sortAsc }]
+// Each history entry snapshots sort and viewport state so Back/Forward restores
+// the directory exactly as it was viewed.
+const history = []; // [{ path, sortKey, sortAsc, listScrollTop, columnScrollLeft, columnScrollTops }]
 let historyIndex = -1;
 let HOME = "/";
 
 function historyEntry(path) {
-  return { path, sortKey, sortAsc };
+  return { path, sortKey, sortAsc, listScrollTop: 0, columnScrollLeft: 0, columnScrollTops: [] };
+}
+
+function captureCurrentHistoryView() {
+  if (historyIndex < 0 || !currentDir) return;
+  const entry = history[historyIndex];
+  if (!entry || entry.path !== currentDir) return;
+  entry.listScrollTop = listViewEl.scrollTop;
+  entry.columnScrollLeft = columnViewEl.scrollLeft;
+  entry.columnScrollTops = Array.from(columnViewEl.querySelectorAll(".mcol"), (col) => col.scrollTop);
+}
+
+function restoreHistoryView(entry) {
+  if (!entry) return;
+  if (viewMode === "columns") {
+    columnViewEl.scrollLeft = entry.columnScrollLeft || 0;
+    columnViewEl.querySelectorAll(".mcol").forEach((col, idx) => {
+      col.scrollTop = entry.columnScrollTops?.[idx] || 0;
+    });
+  } else {
+    listViewEl.scrollTop = entry.listScrollTop || 0;
+  }
 }
 
 function restoreHistorySort(entry) {
@@ -330,6 +350,7 @@ function buildFavorites() {
 }
 
 async function navigate(path, replace = false, selectPath = null, savedHistoryEntry = null) {
+  captureCurrentHistoryView();
   let listing;
   try {
     listing = await invoke("list_dir", { path });
@@ -373,6 +394,9 @@ async function navigate(path, replace = false, selectPath = null, savedHistoryEn
   } else {
     clearPreview();
   }
+  // Selection rendering can scroll an item into view; restore the exact saved
+  // viewport afterward so Back/Forward does not jump.
+  restoreHistoryView(savedHistoryEntry);
 }
 
 // The parent directory of a path, or "/" at the root.
@@ -1068,6 +1092,7 @@ document.getElementById("view-columns").addEventListener("click", () => setViewM
 // Finder controls
 function goBack() {
   if (historyIndex > 0) {
+    captureCurrentHistoryView();
     const from = history[historyIndex].path;
     historyIndex--;
     const target = history[historyIndex];
@@ -1079,6 +1104,7 @@ function goBack() {
 
 function goForward() {
   if (historyIndex < history.length - 1) {
+    captureCurrentHistoryView();
     historyIndex++;
     const target = history[historyIndex];
     navigate(target.path, "silent", null, target);
@@ -1175,7 +1201,8 @@ function applySort(key) {
   savePref("scope.sortKey", sortKey);
   savePref("scope.sortAsc", sortAsc);
   if (historyIndex >= 0 && history[historyIndex]?.path === currentDir) {
-    history[historyIndex] = historyEntry(currentDir);
+    history[historyIndex].sortKey = sortKey;
+    history[historyIndex].sortAsc = sortAsc;
   }
   updateSortHeaderUI();
   if (viewMode === "columns") renderColumns();
