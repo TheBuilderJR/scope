@@ -1066,7 +1066,7 @@ document.getElementById("view-list").addEventListener("click", () => setViewMode
 document.getElementById("view-columns").addEventListener("click", () => setViewMode("columns"));
 
 // Finder controls
-document.getElementById("nav-back").addEventListener("click", () => {
+function goBack() {
   if (historyIndex > 0) {
     const from = history[historyIndex].path;
     historyIndex--;
@@ -1075,14 +1075,18 @@ document.getElementById("nav-back").addEventListener("click", () => {
     // Reselect the folder we came from if it lives in the dir we land on.
     navigate(to, "silent", parentOf(from) === to ? from : null, target);
   }
-});
-document.getElementById("nav-forward").addEventListener("click", () => {
+}
+
+function goForward() {
   if (historyIndex < history.length - 1) {
     historyIndex++;
     const target = history[historyIndex];
     navigate(target.path, "silent", null, target);
   }
-});
+}
+
+document.getElementById("nav-back").addEventListener("click", goBack);
+document.getElementById("nav-forward").addEventListener("click", goForward);
 document.getElementById("nav-up").addEventListener("click", () => {
   const from = currentDir;
   navigate(parentOf(from), false, from);
@@ -1091,6 +1095,21 @@ document.getElementById("nav-home").addEventListener("click", () => navigate(HOM
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
 
 document.addEventListener("keydown", (ev) => {
+  // Browser/Finder-style history navigation: ⌘[ goes back, ⌘] forward.
+  // Use `code` so the shortcuts follow the physical bracket keys regardless
+  // of the characters produced by the active keyboard layout.
+  if (activeView === "finder" && ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+    if (ev.code === "BracketLeft") {
+      ev.preventDefault();
+      goBack();
+      return;
+    }
+    if (ev.code === "BracketRight") {
+      ev.preventDefault();
+      goForward();
+      return;
+    }
+  }
   // Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
   if (ev.metaKey && ev.shiftKey && ev.code === "Period") {
     ev.preventDefault();
