@@ -241,6 +241,7 @@ let selectedPaths = new Set(); // full multi-selection (list view)
 let selectAnchor = null; // range anchor for shift-click
 let sortKey = loadPref("scope.sortKey", "name");
 let sortAsc = loadPref("scope.sortAsc", true);
+let groupBy = loadPref("scope.groupBy", "modified"); // "none" | "modified" | "created"
 // Finder-style view options, persisted across launches.
 let foldersOnTop = loadPref("scope.foldersOnTop", false);
 let visibleCols = loadPref("scope.visibleCols", {
@@ -512,6 +513,47 @@ function sortedFiltered() {
   return filterEntries(currentEntries).sort(compareEntries);
 }
 
+// Finder-style calendar buckets for list grouping. Recent buckets use local
+// calendar boundaries (not fixed 24-hour durations, which break across DST),
+// followed by month names in reverse chronological order.
+function dateGroup(entry) {
+  const secs = entry[groupBy];
+  if (!secs) return { key: "none", label: "No Date", tier: 5, month: 0 };
+
+  const date = new Date(secs * 1000);
+  if (Number.isNaN(date.getTime())) return { key: "none", label: "No Date", tier: 5, month: 0 };
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const previous7 = new Date(today);
+  previous7.setDate(previous7.getDate() - 7);
+  const previous30 = new Date(today);
+  previous30.setDate(previous30.getDate() - 30);
+
+  if (date >= today) return { key: "today", label: "Today", tier: 0, month: 0 };
+  if (date >= yesterday) return { key: "yesterday", label: "Yesterday", tier: 1, month: 0 };
+  if (date >= previous7) return { key: "previous-7", label: "Previous 7 Days", tier: 2, month: 0 };
+  if (date >= previous30) return { key: "previous-30", label: "Previous 30 Days", tier: 3, month: 0 };
+
+  const monthStart = new Date(date.getFullYear(), date.getMonth(), 1).getTime();
+  const sameYear = date.getFullYear() === today.getFullYear();
+  const label = date.toLocaleDateString(undefined, { month: "long", year: sameYear ? undefined : "numeric" });
+  return { key: `month-${monthStart}`, label, tier: 4, month: monthStart };
+}
+
+function groupedEntries(list) {
+  if (groupBy === "none") return [{ label: null, entries: list }];
+  const buckets = new Map();
+  for (const entry of list) {
+    const group = dateGroup(entry);
+    if (!buckets.has(group.key)) buckets.set(group.key, { ...group, entries: [] });
+    buckets.get(group.key).entries.push(entry);
+  }
+  return [...buckets.values()].sort((a, b) => a.tier - b.tier || b.month - a.month);
+}
+
 // ---- Recursive folder sizes (Finder's "Calculate all sizes") ----
 // Computed lazily in the background so the listing renders immediately. Cache
 // values: undefined/"pending" = not ready, number = bytes, null = failed.
@@ -598,17 +640,25 @@ function scheduleSizeResort() {
 
 function renderFiles() {
   const list = sortedFiltered();
+  const groups = groupedEntries(list);
   const foldersToMeasure = [];
   thumbObserver.disconnect();
   fileRows.innerHTML = "";
   finderEmpty.classList.toggle("hidden", list.length > 0);
 
   const frag = document.createDocumentFragment();
-  for (const e of list) {
-    const tr = document.createElement("tr");
-    if (e.hidden) tr.className = "row-hidden";
-    tr.dataset.path = e.path;
-    tr.innerHTML = `
+  for (const group of groups) {
+    if (group.label) {
+      const heading = document.createElement("tr");
+      heading.className = "file-group";
+      heading.innerHTML = `<td colspan="5">${escapeHtml(group.label)}</td>`;
+      frag.appendChild(heading);
+    }
+    for (const e of group.entries) {
+      const tr = document.createElement("tr");
+      if (e.hidden) tr.className = "row-hidden";
+      tr.dataset.path = e.path;
+      tr.innerHTML = `
       <td><div class="name-cell"><span class="ico">${iconFor(e)}</span><span class="txt">${escapeHtml(e.name)}${
       e.is_symlink ? " ↪" : ""
     }</span></div></td>
@@ -616,23 +666,24 @@ function renderFiles() {
       <td class="kind">${e.kind}</td>
       <td class="date">${fmtDate(e.modified)}</td>
       <td class="date date-created">${fmtDate(e.created)}</td>`;
-    tr.addEventListener("click", (ev) => handleRowClick(e, ev));
-    tr.addEventListener("dblclick", () => openEntry(e));
-    tr.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      if (!selectedPaths.has(e.path)) selectSingle(e);
-      openItemMenu(ev.clientX, ev.clientY, e);
-    });
-    tr.draggable = true;
-    tr.addEventListener("dragstart", (ev) => startFileDrag(ev, e));
-    if (selectedPaths.has(e.path)) tr.classList.add("selected");
-    attachThumb(tr.querySelector(".ico"), e);
-    if (e.is_dir && calcFolderSizes) {
-      const c = folderSizeCache.get(e.path);
-      if (typeof c === "number") e.size = c; // keep sort in sync with the shown size
-      else foldersToMeasure.push(e.path);
+      tr.addEventListener("click", (ev) => handleRowClick(e, ev));
+      tr.addEventListener("dblclick", () => openEntry(e));
+      tr.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        if (!selectedPaths.has(e.path)) selectSingle(e);
+        openItemMenu(ev.clientX, ev.clientY, e);
+      });
+      tr.draggable = true;
+      tr.addEventListener("dragstart", (ev) => startFileDrag(ev, e));
+      if (selectedPaths.has(e.path)) tr.classList.add("selected");
+      attachThumb(tr.querySelector(".ico"), e);
+      if (e.is_dir && calcFolderSizes) {
+        const c = folderSizeCache.get(e.path);
+        if (typeof c === "number") e.size = c; // keep sort in sync with the shown size
+        else foldersToMeasure.push(e.path);
+      }
+      frag.appendChild(tr);
     }
-    frag.appendChild(tr);
   }
   fileRows.appendChild(frag);
   queueFolderSizesAfterPaint(foldersToMeasure, currentDir);
@@ -645,7 +696,7 @@ function renderFiles() {
 // source of truth for range selection — sortedFiltered() can disagree with the
 // screen while folder sizes stream in and mutate the sort key mid-flight.
 function displayedPaths() {
-  return Array.from(fileRows.querySelectorAll("tr")).map((tr) => tr.dataset.path);
+  return Array.from(fileRows.querySelectorAll("tr[data-path]"), (tr) => tr.dataset.path);
 }
 
 function displayedEntries() {
@@ -1180,6 +1231,11 @@ const SORT_FIELDS = [
   { key: "modified", label: "Date Modified" },
   { key: "created", label: "Date Created" },
 ];
+const GROUP_FIELDS = [
+  { key: "none", label: "None" },
+  { key: "modified", label: "Date Modified" },
+  { key: "created", label: "Date Created" },
+];
 
 // Reflect the current sort on the list header (active column + direction arrow).
 function updateSortHeaderUI() {
@@ -1214,6 +1270,12 @@ function setFoldersOnTop(on) {
   savePref("scope.foldersOnTop", foldersOnTop);
   if (viewMode === "columns") renderColumns();
   else renderFiles();
+}
+
+function setGroupBy(key) {
+  groupBy = key;
+  savePref("scope.groupBy", groupBy);
+  renderFiles();
 }
 
 function toggleCalcFolderSizes() {
@@ -1301,11 +1363,24 @@ function sortMenuItems() {
   ];
 }
 
+function groupMenuItems() {
+  return [
+    { type: "label", label: "Group By" },
+    ...GROUP_FIELDS.map((field) => ({
+      label: field.label,
+      checked: field.key === groupBy,
+      onClick: () => setGroupBy(field.key),
+    })),
+  ];
+}
+
 // Right-click the list header: Sort By + column show/hide + folders-on-top.
 listViewEl.querySelector("thead").addEventListener("contextmenu", (e) => {
   e.preventDefault();
   openMenu(e.clientX, e.clientY, [
     ...sortMenuItems(),
+    { type: "sep" },
+    ...groupMenuItems(),
     { type: "sep" },
     { type: "label", label: "Show Columns" },
     ...["size", "kind", "modified", "created"].map((col) => {

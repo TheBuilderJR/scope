@@ -491,6 +491,18 @@ button:focus-visible {
 .filelist tbody tr.selected td {
   color: var(--sel-text);
 }
+.filelist tbody tr.file-group,
+.filelist tbody tr.file-group:hover {
+  background: var(--bg);
+}
+.filelist tbody tr.file-group td {
+  padding-top: 11px;
+  padding-bottom: 5px;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 11px;
+  border-bottom-color: var(--line);
+}
 .name-cell {
   display: flex;
   align-items: center;
