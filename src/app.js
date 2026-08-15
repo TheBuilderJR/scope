@@ -648,6 +648,7 @@ function renderFiles() {
   finderEmpty.classList.toggle("hidden", list.length > 0);
 
   const frag = document.createDocumentFragment();
+  let stripeIndex = 0;
   for (const group of groups) {
     if (group.label) {
       const heading = document.createElement("tr");
@@ -658,6 +659,7 @@ function renderFiles() {
     for (const e of group.entries) {
       const tr = document.createElement("tr");
       if (e.hidden) tr.className = "row-hidden";
+      if (stripeIndex++ % 2 === 1) tr.classList.add("row-alt");
       tr.dataset.path = e.path;
       tr.innerHTML = `
       <td><div class="name-cell"><span class="ico">${iconFor(e)}</span><span class="txt">${escapeHtml(e.name)}${

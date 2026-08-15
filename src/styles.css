@@ -358,11 +358,9 @@ button:focus-visible {
 .filelist th:hover {
   color: var(--text);
 }
-/* Column divider lines (also mark the draggable resize boundaries) */
+/* Keep subtle header dividers as resize affordances; body rows use clean
+   Finder-style zebra bands instead of a full grid. */
 .filelist thead th:not(:last-child) {
-  border-right: 1px solid var(--line);
-}
-.filelist tbody td:not(:last-child) {
   border-right: 1px solid var(--line-soft);
 }
 .filelist th.active {
@@ -410,9 +408,7 @@ button:focus-visible {
 /* When Date Created (the last column) is hidden, drop the now-trailing divider
    on Date Modified so there's no stray line at the right edge. */
 .filelist.hide-created.hide-modified th.col-kind,
-.filelist.hide-created.hide-modified td.kind,
-.filelist.hide-created:not(.hide-modified) th.col-date,
-.filelist.hide-created:not(.hide-modified) td.date:not(.date-created) {
+.filelist.hide-created:not(.hide-modified) th.col-date {
   border-right: none;
 }
 /* Right-click column-header menu (View Options) */
@@ -463,7 +459,6 @@ button:focus-visible {
 .filelist td {
   padding: 3px 10px;
   font-size: 11px;
-  border-bottom: 1px solid var(--line-soft);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -482,10 +477,14 @@ button:focus-visible {
 .filelist tbody tr {
   transition: background 0.12s ease, color 0.12s ease;
 }
-.filelist tbody tr:hover {
-  background: var(--bg-elev);
+.filelist tbody tr.row-alt {
+  background: #f5f5f6;
 }
-.filelist tbody tr.selected {
+.filelist tbody tr[data-path]:hover {
+  background: #e9eef6;
+}
+.filelist tbody tr.selected,
+.filelist tbody tr.selected:hover {
   background: var(--sel);
 }
 .filelist tbody tr.selected td {
@@ -501,7 +500,6 @@ button:focus-visible {
   color: var(--text);
   font-weight: 600;
   font-size: 11px;
-  border-bottom-color: var(--line);
 }
 .name-cell {
   display: flex;
