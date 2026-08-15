@@ -278,12 +278,12 @@ function savePref(key, value) {
 let columns = []; // [{ path, listing, selectedPath }]
 // Each history entry snapshots sort and viewport state so Back/Forward restores
 // the directory exactly as it was viewed.
-const history = []; // [{ path, sortKey, sortAsc, listScrollTop, columnScrollLeft, columnScrollTops }]
+const history = []; // [{ path, sortKey, sortAsc, groupBy, listScrollTop, columnScrollLeft, columnScrollTops }]
 let historyIndex = -1;
 let HOME = "/";
 
 function historyEntry(path) {
-  return { path, sortKey, sortAsc, listScrollTop: 0, columnScrollLeft: 0, columnScrollTops: [] };
+  return { path, sortKey, sortAsc, groupBy, listScrollTop: 0, columnScrollLeft: 0, columnScrollTops: [] };
 }
 
 function captureCurrentHistoryView() {
@@ -311,6 +311,7 @@ function restoreHistorySort(entry) {
   if (!entry) return;
   sortKey = entry.sortKey;
   sortAsc = entry.sortAsc;
+  groupBy = entry.groupBy;
   updateSortHeaderUI();
 }
 
@@ -1256,9 +1257,16 @@ function applySort(key) {
   }
   savePref("scope.sortKey", sortKey);
   savePref("scope.sortAsc", sortAsc);
+  // Date headings implicitly follow the date column being sorted, so choosing
+  // Date Created cannot leave the rows grouped by Date Modified (and vice versa).
+  if (key === "modified" || key === "created") {
+    groupBy = key;
+    savePref("scope.groupBy", groupBy);
+  }
   if (historyIndex >= 0 && history[historyIndex]?.path === currentDir) {
     history[historyIndex].sortKey = sortKey;
     history[historyIndex].sortAsc = sortAsc;
+    history[historyIndex].groupBy = groupBy;
   }
   updateSortHeaderUI();
   if (viewMode === "columns") renderColumns();
@@ -1275,6 +1283,9 @@ function setFoldersOnTop(on) {
 function setGroupBy(key) {
   groupBy = key;
   savePref("scope.groupBy", groupBy);
+  if (historyIndex >= 0 && history[historyIndex]?.path === currentDir) {
+    history[historyIndex].groupBy = groupBy;
+  }
   renderFiles();
 }
 
