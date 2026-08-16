@@ -541,8 +541,8 @@ button:focus-visible {
   background: var(--bg);
 }
 .mcol {
-  width: var(--mcol-w, 230px);
-  flex-shrink: 0;
+  min-width: var(--mcol-w, 230px);
+  flex: 1 0 var(--mcol-w, 230px);
   overflow-y: auto;
   padding: 4px;
 }

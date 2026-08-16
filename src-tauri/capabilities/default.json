@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capabilities granted to the main Scope window",
   "windows": ["main"],
-  "permissions": ["core:default", "drag:allow-start-drag"]
+  "permissions": ["core:default", "core:webview:allow-set-webview-zoom", "drag:allow-start-drag"]
 }

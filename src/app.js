@@ -242,6 +242,7 @@ let selectAnchor = null; // range anchor for shift-click
 let sortKey = loadPref("scope.sortKey", "name");
 let sortAsc = loadPref("scope.sortAsc", true);
 let groupBy = loadPref("scope.groupBy", "modified"); // "none" | "modified" | "created"
+let appZoom = loadPref("scope.zoom", 1);
 // Finder-style view options, persisted across launches.
 let foldersOnTop = loadPref("scope.foldersOnTop", false);
 let visibleCols = loadPref("scope.visibleCols", {
@@ -275,6 +276,18 @@ function savePref(key, value) {
     /* ignore quota errors */
   }
 }
+
+function setAppZoom(value, persist = true) {
+  const numeric = Number(value);
+  const safe = Number.isFinite(numeric) ? numeric : 1;
+  appZoom = Math.min(1.75, Math.max(0.75, Math.round(safe * 10) / 10));
+  if (persist) savePref("scope.zoom", appZoom);
+  invoke("plugin:webview|set_webview_zoom", { value: appZoom }).catch((err) => console.error("zoom:", err));
+}
+
+// Restore zoom before the initial directory finishes loading so the first
+// useful frame already has the user's preferred scale.
+setAppZoom(appZoom, false);
 let columns = []; // [{ path, listing, selectedPath }]
 // Each history entry snapshots sort and viewport state so Back/Forward restores
 // the directory exactly as it was viewed.
@@ -956,7 +969,7 @@ function renderColumns() {
   thumbObserver.disconnect();
   // Preserve each existing column's vertical scroll so drilling into a folder
   // doesn't jump the earlier columns back to the top (Finder keeps them put).
-  const prevScroll = Array.from(columnViewEl.children).map((c) => c.scrollTop);
+  const prevScroll = Array.from(columnViewEl.querySelectorAll(".mcol"), (c) => c.scrollTop);
   columnViewEl.innerHTML = "";
   columns.forEach((col, idx) => {
     const colEl = document.createElement("div");
@@ -998,7 +1011,7 @@ function renderColumns() {
   });
   // Restore prior vertical scroll positions for columns that persisted; any
   // newly added column has no saved value and correctly starts at the top.
-  Array.from(columnViewEl.children).forEach((c, i) => {
+  columnViewEl.querySelectorAll(".mcol").forEach((c, i) => {
     if (prevScroll[i] != null) c.scrollTop = prevScroll[i];
   });
   // scroll to reveal the newest column
@@ -1187,6 +1200,21 @@ document.addEventListener("keydown", (ev) => {
     if (ev.code === "BracketRight") {
       ev.preventDefault();
       goForward();
+      return;
+    }
+    if (ev.code === "Equal" || ev.code === "NumpadAdd") {
+      ev.preventDefault();
+      setAppZoom(appZoom + 0.1);
+      return;
+    }
+    if (ev.code === "Minus" || ev.code === "NumpadSubtract") {
+      ev.preventDefault();
+      setAppZoom(appZoom - 0.1);
+      return;
+    }
+    if (ev.code === "Digit0" || ev.code === "Numpad0") {
+      ev.preventDefault();
+      setAppZoom(1);
       return;
     }
   }
