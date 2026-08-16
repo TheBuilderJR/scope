@@ -1336,6 +1336,8 @@ function applyColumnVisibility() {
   for (const col of ["size", "kind", "modified", "created"]) {
     listViewEl.classList.toggle(`hide-${col}`, !visibleCols[col]);
   }
+  // Rebalance the remaining visible columns across the full table width.
+  listViewEl.querySelector("table").refreshColumnWidths?.();
 }
 applyColumnVisibility();
 applyMcolWidth();
@@ -1806,7 +1808,7 @@ document.querySelectorAll("#window-selector .win").forEach((b) => {
 const RESIZE_EDGE = 6; // px hit zone around a column boundary
 const MIN_COL = 44; // px minimum column width
 
-function makeColumnsResizable(table, storageKey) {
+function makeColumnsResizable(table, storageKey, proportional = false) {
   if (!table) return;
   const thead = table.querySelector("thead");
   if (!thead) return;
@@ -1815,16 +1817,31 @@ function makeColumnsResizable(table, storageKey) {
   // display:none), so dividers only appear between visible columns.
   const participates = (th) => th && th.dataset.noresize !== "1" && th.offsetParent !== null;
 
-  // Restore saved widths.
+  // Restore saved widths. List-view values are treated as relative weights so
+  // legacy pixel widths migrate automatically and full-screen windows never
+  // end with a blank gutter after the last column.
   let saved = {};
   try {
     saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
   } catch {
     saved = {};
   }
-  ths.forEach((th, i) => {
-    if (saved[i] && participates(th)) th.style.width = `${saved[i]}px`;
-  });
+  const initialWidths = ths.map((th) => th.offsetWidth || MIN_COL);
+  const applyProportionalWidths = () => {
+    const visible = ths.map((th, i) => ({ th, i })).filter(({ th }) => participates(th));
+    const total = visible.reduce((sum, { i }) => sum + (saved[i] || initialWidths[i] || 1), 0) || 1;
+    visible.forEach(({ th, i }) => {
+      th.style.width = `${((saved[i] || initialWidths[i] || 1) / total) * 100}%`;
+    });
+  };
+  if (proportional) {
+    applyProportionalWidths();
+    table.refreshColumnWidths = applyProportionalWidths;
+  } else {
+    ths.forEach((th, i) => {
+      if (saved[i] && participates(th)) th.style.width = `${saved[i]}px`;
+    });
+  }
 
   // The boundary near clientX is the right edge of th[i] where th[i] and
   // th[i+1] both participate. Returns [A, B] (left, right) or null.
@@ -1851,8 +1868,10 @@ function makeColumnsResizable(table, storageKey) {
   const persist = () => {
     const widths = {};
     ths.forEach((t, j) => {
-      if (t.style.width) widths[j] = parseInt(t.style.width, 10);
+      if (participates(t)) widths[j] = t.offsetWidth;
+      else if (saved[j]) widths[j] = saved[j];
     });
+    saved = widths;
     try {
       localStorage.setItem(storageKey, JSON.stringify(widths));
     } catch {
@@ -1877,6 +1896,7 @@ function makeColumnsResizable(table, storageKey) {
     const startX = e.clientX;
     const startA = A.offsetWidth;
     const sum = startA + B.offsetWidth;
+    const tableWidth = table.getBoundingClientRect().width;
     let moved = false;
     dragging = true;
     document.body.style.cursor = "col-resize";
@@ -1884,8 +1904,13 @@ function makeColumnsResizable(table, storageKey) {
     const onMove = (ev) => {
       moved = true;
       const newA = Math.max(MIN_COL, Math.min(sum - MIN_COL, startA + ev.clientX - startX));
-      A.style.width = `${newA}px`;
-      B.style.width = `${sum - newA}px`;
+      if (proportional) {
+        A.style.width = `${(newA / tableWidth) * 100}%`;
+        B.style.width = `${((sum - newA) / tableWidth) * 100}%`;
+      } else {
+        A.style.width = `${newA}px`;
+        B.style.width = `${sum - newA}px`;
+      }
     };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
@@ -1916,7 +1941,7 @@ function makeColumnsResizable(table, storageKey) {
   );
 }
 
-makeColumnsResizable(document.querySelector("#list-view table"), "scope.colw.files");
+makeColumnsResizable(document.querySelector("#list-view table"), "scope.colw.files", true);
 makeColumnsResizable(document.querySelector(".proc-table"), "scope.colw.proc");
 
 // ===========================================================================
