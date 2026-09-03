@@ -46,7 +46,8 @@ scope <folder>
 ```
 Opens the given folder (default: the current directory) in a new Scope window.
 Repeated commands create additional windows in the existing app process, like
-opening multiple Finder windows.
+opening multiple Finder windows. CLI-opened windows are centered and brought
+to the foreground.
 
 ## Building
 

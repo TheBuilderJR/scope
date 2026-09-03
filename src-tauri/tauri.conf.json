@@ -12,6 +12,7 @@
       {
         "title": "Scope",
         "label": "main",
+        "center": true,
         "width": 1280,
         "height": 820,
         "minWidth": 860,

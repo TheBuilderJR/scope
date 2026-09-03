@@ -732,6 +732,16 @@ fn parse_path_arg(argv: &[String]) -> Option<String> {
     None
 }
 
+/// Bring a newly launched Finder window forward even when Scope was started
+/// by a backgrounded shell process. On macOS, `set_focus` also activates the
+/// application ahead of Terminal.
+fn present_window(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.center();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 // ---------------------------------------------------------------------------
 // App bootstrap
 // ---------------------------------------------------------------------------
@@ -773,7 +783,7 @@ pub fn run() {
                 .and_then(|builder| builder.build())
             {
                 Ok(window) => {
-                    let _ = window.set_focus();
+                    present_window(&window);
                 }
                 Err(error) => {
                     app.state::<AppState>()
@@ -795,6 +805,9 @@ pub fn run() {
                     .lock()
                     .unwrap()
                     .insert("main".to_string(), path);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                present_window(&window);
             }
             Ok(())
         })
