@@ -19,8 +19,7 @@ A clean, native-feeling **light theme** styled after macOS Finder.
 - A **preview / info pane** with live previews of images, video, audio, PDFs,
   and text/source files, plus full metadata (size, kind, created / modified /
   accessed dates, permissions, path).
-- Sidebar of favorites with custom icons (Home, Desktop, Documents, Downloads,
-  Applications, Root).
+- Sidebar of favorites and mounted volumes with custom icons.
 - Clickable breadcrumb path, plus Back / Forward / Up / Home navigation.
 - Live name filter; toggle hidden files with the Finder hotkey **⌘⇧.**.
 - Double-click folders to open, files to launch in their default app.
@@ -43,9 +42,9 @@ A clean, native-feeling **light theme** styled after macOS Finder.
 ```
 scope <folder>
 ```
-Opens the given folder (default: the current directory) in the Scope GUI.
-If Scope is already running, the folder is forwarded to the existing window
-(via Tauri's single-instance plugin) rather than opening a second copy.
+Opens the given folder (default: the current directory) in a new Scope window.
+Repeated commands create additional windows in the existing app process, like
+opening multiple Finder windows.
 
 ## Building
 

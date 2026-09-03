@@ -3,9 +3,8 @@
 #
 # Usage:  scope [folder]
 #
-# Opens the given folder (default: current directory) in the Scope GUI.
-# If Scope is already running, the folder is forwarded to the existing window
-# (via the single-instance plugin) instead of launching a second copy.
+# Opens the given folder (default: current directory) in a new Scope window.
+# If Scope is already running, the single app process creates another window.
 
 set -eu
 

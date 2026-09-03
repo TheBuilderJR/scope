@@ -6,13 +6,15 @@
 //   * system metrics (system_snapshot, process_list, kill_process)
 // plus initial_path() so the GUI can honour `scope <folder>` from the CLI.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
 use sysinfo::{Disks, Networks, Pid, ProcessesToUpdate, System};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -21,8 +23,11 @@ use tauri::{Emitter, Manager};
 struct AppState {
     sys: Mutex<System>,
     networks: Mutex<Networks>,
-    initial_path: Mutex<Option<String>>,
+    // Every Finder window gets its own CLI-provided starting directory.
+    initial_paths: Mutex<HashMap<String, String>>,
 }
+
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // File browser
@@ -239,8 +244,40 @@ fn open_with(args: &[&str]) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn initial_path(state: tauri::State<AppState>) -> Option<String> {
-    state.initial_path.lock().unwrap().clone()
+fn initial_path(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> Option<String> {
+    state.initial_paths.lock().unwrap().remove(window.label())
+}
+
+#[derive(Serialize)]
+struct MountedVolume {
+    name: String,
+    path: String,
+    removable: bool,
+}
+
+/// Return the local, user-visible mounted volumes that macOS exposes in
+/// Finder. `sysinfo` deliberately omits hidden APFS/system volumes here.
+#[tauri::command]
+fn mounted_volumes() -> Vec<MountedVolume> {
+    let disks = Disks::new_with_refreshed_list();
+    let mut volumes: Vec<MountedVolume> = disks
+        .iter()
+        .map(|disk| MountedVolume {
+            name: disk.name().to_string_lossy().to_string(),
+            path: disk.mount_point().to_string_lossy().to_string(),
+            removable: disk.is_removable(),
+        })
+        .collect();
+
+    // Keep the startup disk first, followed by mounted volumes by name.
+    volumes.sort_by(
+        |a, b| match (a.path.as_str() == "/", b.path.as_str() == "/") {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        },
+    );
+    volumes
 }
 
 #[derive(Serialize)]
@@ -640,21 +677,46 @@ pub fn run() {
         // populated lazily when the user first opens the Monitor tab.
         sys: Mutex::new(System::new()),
         networks: Mutex::new(Networks::new()),
-        initial_path: Mutex::new(None),
+        initial_paths: Mutex::new(HashMap::new()),
     };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // A second `scope <folder>` invocation: forward the path to the
-            // already-running window instead of launching a new one.
+            // A second `scope <folder>` invocation gets a new Finder window,
+            // while the single-instance plugin keeps every window in the same
+            // app process (matching Finder's behavior).
+            let label = format!("scope-{}", NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed));
             if let Some(path) = parse_path_arg(&argv) {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.set_focus();
-                    let _ = win.emit("scope://open-path", path);
+                app.state::<AppState>()
+                    .initial_paths
+                    .lock()
+                    .unwrap()
+                    .insert(label.clone(), path);
+            }
+
+            let Some(base_config) = app.config().app.windows.iter().find(|c| c.label == "main")
+            else {
+                eprintln!("scope: missing main window configuration");
+                return;
+            };
+            let mut config = base_config.clone();
+            config.label = label.clone();
+
+            match tauri::WebviewWindowBuilder::from_config(app, &config)
+                .and_then(|builder| builder.build())
+            {
+                Ok(window) => {
+                    let _ = window.set_focus();
                 }
-            } else if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_focus();
+                Err(error) => {
+                    app.state::<AppState>()
+                        .initial_paths
+                        .lock()
+                        .unwrap()
+                        .remove(&label);
+                    eprintln!("scope: could not open a new window: {error}");
+                }
             }
         }))
         .manage(state)
@@ -662,7 +724,11 @@ pub fn run() {
             // Record any folder passed on the command line at first launch.
             let args: Vec<String> = std::env::args().collect();
             if let Some(path) = parse_path_arg(&args) {
-                *app.state::<AppState>().initial_path.lock().unwrap() = Some(path);
+                app.state::<AppState>()
+                    .initial_paths
+                    .lock()
+                    .unwrap()
+                    .insert("main".to_string(), path);
             }
             Ok(())
         })
@@ -674,6 +740,7 @@ pub fn run() {
             move_to_trash,
             dir_size,
             initial_path,
+            mounted_volumes,
             read_text_preview,
             stat_path,
             thumbnail,

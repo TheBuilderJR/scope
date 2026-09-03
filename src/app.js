@@ -2,7 +2,6 @@
 // (enabled with `withGlobalTauri` in tauri.conf.json).
 
 const { invoke, convertFileSrc, Channel } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -224,6 +223,8 @@ function switchView(name) {
 const fileRows = document.getElementById("file-rows");
 const breadcrumbEl = document.getElementById("breadcrumb");
 const favoritesEl = document.getElementById("favorites");
+const volumesEl = document.getElementById("volumes");
+const locationsTitleEl = document.getElementById("locations-title");
 const finderStatus = document.getElementById("finder-status");
 const finderEmpty = document.getElementById("finder-empty");
 const finderSearch = document.getElementById("finder-search");
@@ -242,6 +243,9 @@ let selectAnchor = null; // range anchor for shift-click
 let sortKey = loadPref("scope.sortKey", "name");
 let sortAsc = loadPref("scope.sortAsc", true);
 let groupBy = loadPref("scope.groupBy", "modified"); // "none" | "modified" | "created"
+// Older saved preferences may combine Size sorting with date grouping. Size is
+// always a flat list so its global ordering remains visible.
+if (sortKey === "size") groupBy = "none";
 let appZoom = loadPref("scope.zoom", 1);
 // Finder-style view options, persisted across launches.
 let foldersOnTop = loadPref("scope.foldersOnTop", false);
@@ -324,17 +328,39 @@ function restoreHistorySort(entry) {
   if (!entry) return;
   sortKey = entry.sortKey;
   sortAsc = entry.sortAsc;
-  groupBy = entry.groupBy;
+  groupBy = entry.sortKey === "size" ? "none" : entry.groupBy;
   updateSortHeaderUI();
 }
 
 async function initFinder() {
   // These are independent, so avoid paying two serial IPC round trips before
   // the first directory can render.
-  const [home, initial] = await Promise.all([invoke("home_dir"), invoke("initial_path")]);
+  const [home, initial, volumes] = await Promise.all([
+    invoke("home_dir"),
+    invoke("initial_path"),
+    invoke("mounted_volumes").catch(() => []),
+  ]);
   HOME = home;
   buildFavorites();
+  buildVolumes(volumes);
   await navigate(initial || HOME, true);
+}
+
+function addSidebarLocation(parent, { name, path, ico = "drive", title = path }) {
+  const li = document.createElement("li");
+  li.dataset.path = path;
+  li.tabIndex = 0;
+  li.title = title;
+  li.setAttribute("role", "button");
+  li.innerHTML = `<span class="ico">${svg(ico)}</span><span>${escapeHtml(name)}</span>`;
+  li.addEventListener("click", () => navigate(path));
+  li.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      navigate(path);
+    }
+  });
+  parent.appendChild(li);
 }
 
 function buildFavorites() {
@@ -344,24 +370,30 @@ function buildFavorites() {
     { name: "Documents", path: `${HOME}/Documents`, ico: "documents" },
     { name: "Downloads", path: `${HOME}/Downloads`, ico: "downloads" },
     { name: "Applications", path: "/Applications", ico: "applications" },
-    { name: "Root", path: "/", ico: "drive" },
   ];
   favoritesEl.innerHTML = "";
-  favs.forEach((f) => {
-    const li = document.createElement("li");
-    li.dataset.path = f.path;
-    li.tabIndex = 0;
-    li.setAttribute("role", "button");
-    li.innerHTML = `<span class="ico">${svg(f.ico)}</span><span>${f.name}</span>`;
-    li.addEventListener("click", () => navigate(f.path));
-    li.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        navigate(f.path);
-      }
+  favs.forEach((favorite) => addSidebarLocation(favoritesEl, favorite));
+}
+
+function buildVolumes(volumes) {
+  volumesEl.innerHTML = "";
+  for (const volume of volumes) {
+    addSidebarLocation(volumesEl, {
+      name: volume.name || (volume.path === "/" ? "Macintosh HD" : volume.path.split("/").pop()),
+      path: volume.path,
+      title: volume.path,
     });
-    favoritesEl.appendChild(li);
-  });
+  }
+  locationsTitleEl.classList.toggle("hidden", volumes.length === 0);
+  highlightFavorite();
+}
+
+async function refreshVolumes() {
+  try {
+    buildVolumes(await invoke("mounted_volumes"));
+  } catch (error) {
+    console.error("mounted volumes:", error);
+  }
 }
 
 async function navigate(path, replace = false, selectPath = null, savedHistoryEntry = null) {
@@ -428,7 +460,9 @@ function scrollSelectedIntoView() {
 }
 
 function highlightFavorite() {
-  favoritesEl.querySelectorAll("li").forEach((li) => li.classList.toggle("active", li.dataset.path === currentDir));
+  document.querySelectorAll("#favorites li, #volumes li").forEach((li) =>
+    li.classList.toggle("active", li.dataset.path === currentDir)
+  );
 }
 
 function updateNavButtons() {
@@ -558,7 +592,7 @@ function dateGroup(entry) {
 }
 
 function groupedEntries(list) {
-  if (groupBy === "none") return [{ label: null, entries: list }];
+  if (groupBy === "none" || sortKey === "size") return [{ label: null, entries: list }];
   const buckets = new Map();
   for (const entry of list) {
     const group = dateGroup(entry);
@@ -1289,7 +1323,10 @@ function applySort(key) {
   savePref("scope.sortAsc", sortAsc);
   // Date headings implicitly follow the date column being sorted, so choosing
   // Date Created cannot leave the rows grouped by Date Modified (and vice versa).
-  if (key === "modified" || key === "created") {
+  if (key === "size") {
+    groupBy = "none";
+    savePref("scope.groupBy", groupBy);
+  } else if (key === "modified" || key === "created") {
     groupBy = key;
     savePref("scope.groupBy", groupBy);
   }
@@ -1311,7 +1348,9 @@ function setFoldersOnTop(on) {
 }
 
 function setGroupBy(key) {
-  groupBy = key;
+  // Size must remain a true global ordering, so date buckets are unavailable
+  // until the user switches to another sort field.
+  groupBy = sortKey === "size" ? "none" : key;
   savePref("scope.groupBy", groupBy);
   if (historyIndex >= 0 && history[historyIndex]?.path === currentDir) {
     history[historyIndex].groupBy = groupBy;
@@ -1944,17 +1983,9 @@ function makeColumnsResizable(table, storageKey, proportional = false) {
 makeColumnsResizable(document.querySelector("#list-view table"), "scope.colw.files", true);
 makeColumnsResizable(document.querySelector(".proc-table"), "scope.colw.proc");
 
-// ===========================================================================
-// CLI forwarding: `scope <folder>` from a second invocation
-// ===========================================================================
-
-listen("scope://open-path", (event) => {
-  const path = event.payload;
-  if (path) {
-    switchView("finder");
-    navigate(path);
-  }
-});
+// Refresh Locations after disks are mounted or ejected while Scope is in the
+// background. Window focus avoids needless polling.
+window.addEventListener("focus", refreshVolumes);
 
 // ---------------------------------------------------------------------------
 initFinder();

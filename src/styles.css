@@ -254,6 +254,9 @@ input[type="search"]:focus {
   letter-spacing: 0.6px;
   padding: 0 8px 8px;
 }
+.sidebar-title.sidebar-section {
+  padding-top: 18px;
+}
 .sidebar ul {
   list-style: none;
   margin: 0;
@@ -281,6 +284,12 @@ input[type="search"]:focus {
 }
 .sidebar li .ico {
   color: var(--accent);
+  flex-shrink: 0;
+}
+.sidebar li > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sidebar li.active .ico {
   color: #fff;
