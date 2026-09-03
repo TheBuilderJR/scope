@@ -455,7 +455,9 @@ function scrollSelectedIntoView() {
   const el =
     viewMode === "columns"
       ? columnViewEl.querySelector(".mcol-item.selected")
-      : fileRows.querySelector("tr.selected");
+      : selectedPath
+        ? fileRows.querySelector(`tr[data-path="${CSS.escape(selectedPath)}"]`)
+        : fileRows.querySelector("tr.selected");
   if (el) el.scrollIntoView({ block: "nearest" });
 }
 
@@ -754,6 +756,38 @@ function displayedEntries() {
   return displayedPaths()
     .map((p) => byPath.get(p))
     .filter(Boolean);
+}
+
+// Move the primary selection through the rows exactly as they are currently
+// displayed (including active filtering, sorting, and grouping). Shift keeps
+// the existing anchor and extends or contracts a contiguous range.
+function moveListSelection(step, extend) {
+  const order = displayedEntries();
+  if (!order.length) return;
+
+  const currentIndex = order.findIndex((entry) => entry.path === selectedPath);
+  const nextIndex =
+    currentIndex === -1
+      ? step > 0
+        ? 0
+        : order.length - 1
+      : Math.max(0, Math.min(order.length - 1, currentIndex + step));
+  const next = order[nextIndex];
+
+  if (extend) {
+    if (!selectAnchor || !order.some((entry) => entry.path === selectAnchor)) {
+      selectAnchor = currentIndex === -1 ? next.path : order[currentIndex].path;
+    }
+    const anchorIndex = order.findIndex((entry) => entry.path === selectAnchor);
+    const [start, end] = anchorIndex <= nextIndex ? [anchorIndex, nextIndex] : [nextIndex, anchorIndex];
+    selectedPaths = new Set(order.slice(start, end + 1).map((entry) => entry.path));
+    updatePrimary(next);
+    refreshRowSelectionClasses();
+    updateSelectionPreview();
+  } else {
+    selectSingle(next);
+  }
+  scrollSelectedIntoView();
 }
 
 // Handle a list-row click, honouring ⌘ (toggle) and ⇧ (range) like Finder.
@@ -1251,6 +1285,24 @@ document.addEventListener("keydown", (ev) => {
       setAppZoom(1);
       return;
     }
+  }
+  // Up/Down navigate the visible rows instead of scrolling the file list.
+  // Leave normal caret behavior intact while the user is editing a field.
+  const editingField =
+    ev.target instanceof HTMLElement &&
+    (ev.target.matches("input, textarea, select") || ev.target.isContentEditable);
+  if (
+    activeView === "finder" &&
+    viewMode === "list" &&
+    !editingField &&
+    !ev.metaKey &&
+    !ev.ctrlKey &&
+    !ev.altKey &&
+    (ev.code === "ArrowUp" || ev.code === "ArrowDown")
+  ) {
+    ev.preventDefault();
+    moveListSelection(ev.code === "ArrowDown" ? 1 : -1, ev.shiftKey);
+    return;
   }
   // Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
   if (ev.metaKey && ev.shiftKey && ev.code === "Period") {
