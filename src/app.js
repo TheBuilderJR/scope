@@ -2,6 +2,9 @@
 // (enabled with `withGlobalTauri` in tauri.conf.json).
 
 const { invoke, convertFileSrc, Channel } = window.__TAURI__.core;
+const { getCurrentWebview } = window.__TAURI__.webview;
+const { emit, listen } = window.__TAURI__.event;
+const currentWebview = getCurrentWebview();
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -231,6 +234,15 @@ const finderSearch = document.getElementById("finder-search");
 const listViewEl = document.getElementById("list-view");
 const columnViewEl = document.getElementById("column-view");
 const previewEl = document.getElementById("preview");
+const dropOverlayEl = document.getElementById("drop-overlay");
+const dropIconEl = document.getElementById("drop-icon");
+const dropOperationEl = document.getElementById("drop-operation");
+const dropDestinationEl = document.getElementById("drop-destination");
+const transferProgressEl = document.getElementById("transfer-progress");
+const transferLabelEl = document.getElementById("transfer-label");
+const transferTrackEl = document.getElementById("transfer-track");
+const transferFillEl = document.getElementById("transfer-fill");
+const transferDetailEl = document.getElementById("transfer-detail");
 
 let viewMode = "list"; // "list" | "columns"
 let hiddenShown = false; // toggled with ⌘⇧. like Finder
@@ -986,11 +998,291 @@ async function startFileDrag(ev, entry) {
     await invoke("plugin:drag|start_drag", {
       item: paths,
       image: dragImageDataUri(entry),
-      options: null,
+      // Wry's native drop bridge accepts file URLs with the Copy transport.
+      // Scope resolves the real Finder-style Move/Copy operation at the
+      // receiving window based on volume and the live Option modifier.
+      options: { mode: "copy" },
       onEvent: new Channel(),
     });
   } catch (err) {
     finderStatus.textContent = `⚠ ${err}`;
+  }
+}
+
+let nativeDropDestination = null;
+let nativeDropTargetEl = null;
+let nativeDropPaths = [];
+let nativeDropOperation = "move";
+let nativeDropOperationRevision = 0;
+let nativeDropOperationTimer = null;
+let transferInProgress = false;
+let transferHideTimer = null;
+let optionKeyDown = false;
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Alt") optionKeyDown = true;
+});
+window.addEventListener("keyup", (event) => {
+  if (event.key === "Alt") optionKeyDown = false;
+});
+window.addEventListener("blur", () => {
+  optionKeyDown = false;
+});
+
+function pathBasename(path) {
+  const trimmed = String(path || "").replace(/[\\/]+$/, "");
+  return trimmed.split(/[\\/]/).pop() || path || "/";
+}
+
+function entryForPath(path) {
+  return (
+    currentEntries.find((entry) => entry.path === path) ||
+    columns.flatMap((column) => column.listing?.entries || []).find((entry) => entry.path === path)
+  );
+}
+
+function directoryAtDropPosition(position) {
+  if (!position) return null;
+  const logical =
+    typeof position.toLogical === "function" ? position.toLogical(window.devicePixelRatio || 1) : position;
+  const element = document.elementFromPoint(logical.x, logical.y);
+  const pathElement = element?.closest("[data-path]");
+  if (!pathElement) return null;
+
+  const path = pathElement.dataset.path;
+  if (pathElement.matches(".sidebar li")) return { path, element: pathElement };
+  const entry = entryForPath(path);
+  return entry?.is_dir && entry.kind !== "Application" ? { path, element: pathElement } : null;
+}
+
+function setNativeDropOperation(operation) {
+  nativeDropOperation = operation;
+  dropOperationEl.textContent = operation === "copy" ? "Copy" : operation === "move" ? "Move" : "Transfer";
+  dropIconEl.textContent = operation === "copy" ? "＋" : operation === "move" ? "→" : "↳";
+}
+
+function showNativeDropTarget(position) {
+  if (!currentDir) return null;
+  const hit = directoryAtDropPosition(position);
+  nativeDropDestination = hit?.path || currentDir;
+
+  if (nativeDropTargetEl !== hit?.element) {
+    nativeDropTargetEl?.classList.remove("drop-target");
+    nativeDropTargetEl = hit?.element || null;
+    nativeDropTargetEl?.classList.add("drop-target");
+  }
+
+  dropDestinationEl.textContent = pathBasename(nativeDropDestination);
+  dropDestinationEl.title = nativeDropDestination;
+  setNativeDropOperation(nativeDropOperation);
+  dropOverlayEl.classList.remove("hidden");
+  dropOverlayEl.setAttribute("aria-hidden", "false");
+  return nativeDropDestination;
+}
+
+async function refreshNativeDropOperation() {
+  if (!nativeDropPaths.length || !nativeDropDestination) return;
+  const revision = ++nativeDropOperationRevision;
+  const paths = nativeDropPaths;
+  const destination = nativeDropDestination;
+  try {
+    const operation = await invoke("transfer_operation", {
+      paths,
+      destination,
+      forceCopy: optionKeyDown,
+    });
+    if (revision !== nativeDropOperationRevision || destination !== nativeDropDestination) return;
+    setNativeDropOperation(operation);
+  } catch {
+    // The transfer command will surface a detailed error if the drop occurs.
+  }
+}
+
+function startNativeDropOperationPolling() {
+  if (nativeDropOperationTimer) return;
+  void refreshNativeDropOperation();
+  // NSEvent exposes the live Option state even while WebKit owns the native
+  // drag loop, so the label follows modifier changes just like Finder.
+  nativeDropOperationTimer = setInterval(refreshNativeDropOperation, 120);
+}
+
+function clearNativeDropTarget() {
+  nativeDropTargetEl?.classList.remove("drop-target");
+  nativeDropTargetEl = null;
+  nativeDropDestination = null;
+  nativeDropPaths = [];
+  setNativeDropOperation("move");
+  nativeDropOperationRevision++;
+  clearInterval(nativeDropOperationTimer);
+  nativeDropOperationTimer = null;
+  dropOverlayEl.classList.add("hidden");
+  dropOverlayEl.setAttribute("aria-hidden", "true");
+}
+
+function showTransferProgress(progress, destination) {
+  transferProgressEl.classList.remove("hidden", "error");
+  const action = progress.operation === "copy" ? "copy" : progress.operation === "move" ? "move" : "transfer";
+  const gerund = progress.operation === "copy" ? "Copying" : progress.operation === "move" ? "Moving" : "Transferring";
+  transferLabelEl.textContent =
+    progress.phase === "scanning"
+      ? `Preparing to ${action} to ${pathBasename(destination)}…`
+      : `${gerund} to ${pathBasename(destination)}…`;
+
+  if (progress.phase === "scanning") {
+    transferTrackEl.classList.add("indeterminate");
+    transferTrackEl.removeAttribute("aria-valuenow");
+    transferFillEl.style.width = "";
+    transferDetailEl.textContent = progress.current ? `Scanning ${pathBasename(progress.current)}` : "Calculating size…";
+    return;
+  }
+
+  const total = progress.totalBytes > 0 ? progress.totalBytes : progress.totalItems;
+  const transferred = progress.totalBytes > 0 ? progress.transferredBytes : progress.transferredItems;
+  const percent = total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 0;
+  transferTrackEl.classList.remove("indeterminate");
+  transferTrackEl.setAttribute("aria-valuemin", "0");
+  transferTrackEl.setAttribute("aria-valuemax", "100");
+  transferTrackEl.setAttribute("aria-valuenow", String(percent));
+  transferFillEl.style.width = `${percent}%`;
+
+  const itemProgress = `${progress.transferredItems} of ${progress.totalItems} items`;
+  const byteProgress =
+    progress.totalBytes > 0
+      ? ` · ${fmtBytes(progress.transferredBytes)} of ${fmtBytes(progress.totalBytes)}`
+      : "";
+  const current = progress.current ? ` · ${pathBasename(progress.current)}` : "";
+  transferDetailEl.textContent = `${itemProgress}${byteProgress}${current}`;
+}
+
+function finishTransfer(message, detail, isError = false) {
+  transferProgressEl.classList.remove("hidden");
+  transferProgressEl.classList.toggle("error", isError);
+  transferTrackEl.classList.remove("indeterminate");
+  transferTrackEl.setAttribute("aria-valuenow", isError ? "0" : "100");
+  transferFillEl.style.width = isError ? "0" : "100%";
+  transferLabelEl.textContent = message;
+  transferDetailEl.textContent = detail;
+  clearTimeout(transferHideTimer);
+  transferHideTimer = setTimeout(() => transferProgressEl.classList.add("hidden"), isError ? 6000 : 2600);
+}
+
+async function refreshAfterTransfer(destination, preferredPaths = []) {
+  let listing;
+  try {
+    listing = await invoke("list_dir", { path: destination });
+  } catch {
+    return;
+  }
+
+  const columnIndex = columns.findIndex((column) => column.path === listing.path);
+  if (columnIndex >= 0) columns[columnIndex] = { ...columns[columnIndex], listing };
+  if (currentDir !== listing.path) {
+    if (viewMode === "columns" && columnIndex >= 0) renderColumns();
+    return;
+  }
+
+  currentEntries = listing.entries;
+  const byPath = new Map(currentEntries.map((entry) => [entry.path, entry]));
+  const preferred = preferredPaths.map((path) => byPath.get(path)).filter(Boolean);
+  const survivingSelection = [...selectedPaths].map((path) => byPath.get(path)).filter(Boolean);
+  const nextSelection = preferred.length ? preferred : survivingSelection;
+  selectedEntry = nextSelection.find((entry) => entry.path === selectedPath) || nextSelection[0] || null;
+  if (!selectedEntry) selectedEntry = filterEntries(currentEntries).sort(compareEntries)[0] || null;
+  selectedPath = selectedEntry?.path || null;
+  selectedPaths = new Set(nextSelection.length ? nextSelection.map((entry) => entry.path) : selectedPath ? [selectedPath] : []);
+  selectAnchor = selectedPath;
+  if (columnIndex >= 0) columns[columnIndex].selectedPath = selectedPath;
+
+  if (viewMode === "columns") renderColumns();
+  else renderFiles();
+  updateSelectionPreview();
+  scrollSelectedIntoView();
+}
+
+async function transferDroppedPaths(paths, destination, expectedOperation = "transfer") {
+  paths = [...new Set(paths || [])].filter(Boolean);
+  if (!paths.length || !destination) return;
+  if (transferInProgress) {
+    finderStatus.textContent = "A file transfer is already in progress";
+    return;
+  }
+
+  transferInProgress = true;
+  clearTimeout(transferHideTimer);
+  const initialVerb =
+    expectedOperation === "copy" ? "Copying" : expectedOperation === "move" ? "Moving" : "Transferring";
+  finderStatus.textContent = `${initialVerb} ${paths.length} item${paths.length === 1 ? "" : "s"}…`;
+  const onEvent = new Channel();
+  onEvent.onmessage = (progress) => showTransferProgress(progress, destination);
+
+  try {
+    const summary = await invoke("transfer_paths", { paths, destination, forceCopy: optionKeyDown, onEvent });
+    await refreshAfterTransfer(destination, summary.destinations);
+    const topLevelCount = summary.destinations.length;
+    const pastTense =
+      summary.operation === "copy" ? "Copied" : summary.operation === "move" ? "Moved" : "Transferred";
+    const message = `${pastTense} ${topLevelCount} item${topLevelCount === 1 ? "" : "s"}`;
+    const detail =
+      summary.transferredBytes > 0
+        ? `${fmtBytes(summary.transferredBytes)} transferred`
+        : `${summary.transferredItems} items transferred`;
+    finderStatus.textContent = message;
+    finishTransfer(message, detail);
+    if (summary.sourceDirectories.length) {
+      await emit("scope://files-transferred", {
+        sender: currentWebview.label,
+        sourceDirectories: summary.sourceDirectories,
+      });
+    }
+  } catch (error) {
+    finderStatus.textContent = `⚠ ${error}`;
+    finishTransfer("Transfer failed", String(error), true);
+  } finally {
+    transferInProgress = false;
+  }
+}
+
+async function registerNativeFileDrops() {
+  try {
+    await currentWebview.onDragDropEvent((event) => {
+      const { payload } = event;
+      if (payload.type === "enter" || payload.type === "over") {
+        if (activeView !== "finder") switchView("finder");
+        if (payload.paths?.length) nativeDropPaths = payload.paths;
+        showNativeDropTarget(payload.position);
+        startNativeDropOperationPolling();
+        return;
+      }
+      if (payload.type === "drop") {
+        if (payload.paths?.length) nativeDropPaths = payload.paths;
+        const destination = showNativeDropTarget(payload.position) || currentDir;
+        const paths = payload.paths?.length ? payload.paths : nativeDropPaths;
+        const operation = nativeDropOperation;
+        clearNativeDropTarget();
+        void transferDroppedPaths(paths, destination, operation);
+        return;
+      }
+      clearNativeDropTarget();
+    });
+  } catch (error) {
+    console.error("native file drops:", error);
+  }
+}
+
+async function registerTransferRefresh() {
+  try {
+    await listen("scope://files-transferred", (event) => {
+      const payload = event.payload || {};
+      if (payload.sender === currentWebview.label) return;
+      if (payload.sourceDirectories?.includes(currentDir)) {
+        void refreshAfterTransfer(currentDir);
+      } else if (viewMode === "columns") {
+        const visibleSource = payload.sourceDirectories?.find((path) => columns.some((column) => column.path === path));
+        if (visibleSource) void refreshAfterTransfer(visibleSource);
+      }
+    });
+  } catch (error) {
+    console.error("file transfer refresh:", error);
   }
 }
 
@@ -1060,6 +1352,7 @@ function renderColumns() {
     for (const e of list) {
       const item = document.createElement("div");
       item.className = "mcol-item" + (e.hidden ? " row-hidden" : "") + (e.path === col.selectedPath ? " selected" : "");
+      item.dataset.path = e.path;
       item.innerHTML = `<span class="ico">${iconFor(e)}</span><span class="txt">${escapeHtml(e.name)}</span>${
         e.is_dir && e.kind !== "Application" ? '<span class="chev">›</span>' : ""
       }`;
@@ -2066,4 +2359,6 @@ makeColumnsResizable(document.querySelector(".proc-table"), "scope.colw.proc");
 window.addEventListener("focus", refreshVolumes);
 
 // ---------------------------------------------------------------------------
+registerNativeFileDrops();
+registerTransferRefresh();
 initFinder();

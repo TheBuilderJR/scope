@@ -73,6 +73,26 @@
         <aside id="preview" class="preview">
           <div class="preview-empty">Select an item to preview</div>
         </aside>
+
+        <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true">
+          <div class="drop-message">
+            <span class="drop-icon" id="drop-icon">→</span>
+            <span><span id="drop-operation">Move</span> to <strong id="drop-destination"></strong></span>
+          </div>
+        </div>
+
+        <div id="transfer-progress" class="transfer-progress hidden" role="status" aria-live="polite">
+          <div class="transfer-label" id="transfer-label">Preparing copy…</div>
+          <div
+            class="transfer-track indeterminate"
+            id="transfer-track"
+            role="progressbar"
+            aria-label="Copy progress"
+          >
+            <div class="transfer-fill" id="transfer-fill"></div>
+          </div>
+          <div class="transfer-detail" id="transfer-detail"></div>
+        </div>
       </div>
       <footer class="statusbar" id="finder-status"></footer>
     </section>

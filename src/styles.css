@@ -238,6 +238,7 @@ input[type="search"]:focus {
   flex: 1;
   min-height: 0;
   display: flex;
+  position: relative;
 }
 .sidebar {
   width: 190px;
@@ -699,6 +700,116 @@ button:focus-visible {
   background: var(--bg-elev);
   color: var(--text-faint);
   font-size: 11px;
+}
+
+/* Native file drops arrive outside the webview's HTML drag events. The
+   overlay confirms the resolved destination, while the floating transfer
+   panel remains visible throughout the backend copy. */
+.drop-overlay {
+  position: absolute;
+  inset: 9px;
+  z-index: 40;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  background: rgba(227, 237, 251, 0.8);
+  backdrop-filter: blur(3px);
+}
+.drop-message {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: calc(100% - 40px);
+  padding: 11px 16px;
+  border: 1px solid rgba(10, 99, 206, 0.25);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--text);
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.15);
+}
+.drop-message strong {
+  display: inline-block;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+.drop-icon {
+  color: var(--accent);
+  font-size: 22px;
+  line-height: 1;
+}
+.drop-target {
+  position: relative;
+  z-index: 41;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.transfer-progress {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 50;
+  width: min(360px, calc(100% - 28px));
+  padding: 11px 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(10px);
+}
+.transfer-progress.error {
+  border-color: rgba(255, 59, 48, 0.55);
+}
+.transfer-label {
+  margin-bottom: 7px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transfer-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+}
+.transfer-fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 80ms linear;
+}
+.transfer-track.indeterminate .transfer-fill {
+  width: 36%;
+  animation: transfer-indeterminate 1s ease-in-out infinite;
+}
+.transfer-progress.error .transfer-fill {
+  background: var(--red);
+}
+.transfer-detail {
+  min-height: 14px;
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes transfer-indeterminate {
+  from {
+    transform: translateX(-115%);
+  }
+  to {
+    transform: translateX(280%);
+  }
 }
 
 /* ---------------- Monitor ---------------- */
