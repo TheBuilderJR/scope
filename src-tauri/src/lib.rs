@@ -79,7 +79,7 @@ fn describe_kind(path: &Path, is_dir: bool) -> String {
         Some("pdf") => "PDF Document",
         Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("svg")
         | Some("heic") => "Image",
-        Some("mp4") | Some("mov") | Some("mkv") | Some("avi") => "Movie",
+        Some("mp4") | Some("mov") | Some("mkv") | Some("avi") | Some("wmv") => "Movie",
         Some("mp3") | Some("wav") | Some("flac") | Some("aac") | Some("m4a") => "Audio",
         Some("zip") | Some("gz") | Some("tar") | Some("bz2") | Some("xz") | Some("7z") => {
             "Archive"
@@ -393,6 +393,48 @@ fn thumb_key(path: &str, mtime: i64, size: u32) -> String {
     format!("{:016x}", h)
 }
 
+/// Quick Look commonly returns only a generic icon for WMV files. Prefer a
+/// decoded video frame when FFmpeg is available, checking the standard Intel
+/// and Apple Silicon Homebrew locations as well as the inherited PATH.
+#[cfg(target_os = "macos")]
+fn render_wmv_thumbnail(path: &str, out: &Path, size: u32) -> bool {
+    let scale = format!("scale={size}:{size}:force_original_aspect_ratio=decrease");
+    for seek in ["1", "0"] {
+        for ffmpeg in [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "ffmpeg",
+        ] {
+            let _ = std::fs::remove_file(out);
+            let result = std::process::Command::new(ffmpeg)
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-ss",
+                    seek,
+                    "-i",
+                ])
+                .arg(path)
+                .args(["-frames:v", "1", "-vf", &scale])
+                .arg(out)
+                .output();
+            if result
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+                && out.is_file()
+            {
+                return true;
+            }
+        }
+    }
+    // Do not let a partial file from a failed decoder attempt become a cache
+    // hit on the next request.
+    let _ = std::fs::remove_file(out);
+    false
+}
+
 /// Generate (or return a cached) QuickLook thumbnail for a file, exactly like
 /// Finder does — image content, PDF first pages, video frames, doc icons, etc.
 /// Returns the absolute path to a PNG, or None if no thumbnail is available.
@@ -419,7 +461,18 @@ async fn thumbnail(
         }
         let size = size.clamp(16, 1024);
         let mtime = systime_secs(meta.modified()).unwrap_or(0);
-        let key = thumb_key(&path, mtime, size);
+        let is_wmv = Path::new(&path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case("wmv"))
+            .unwrap_or(false);
+        // Keep WMV frame previews separate from any generic Quick Look icon
+        // cached by an older Scope version for the same file.
+        let key = if is_wmv {
+            format!("wmv-frame-{}", thumb_key(&path, mtime, size))
+        } else {
+            thumb_key(&path, mtime, size)
+        };
 
         let cache_dir = app
             .path()
@@ -430,6 +483,19 @@ async fn thumbnail(
         let out = cache_dir.join(format!("{key}.png"));
         if out.exists() {
             return Ok(Some(out.to_string_lossy().to_string()));
+        }
+
+        if is_wmv {
+            let rendered = tauri::async_runtime::spawn_blocking({
+                let path = path.clone();
+                let out = out.clone();
+                move || render_wmv_thumbnail(&path, &out, size)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            if rendered {
+                return Ok(Some(out.to_string_lossy().to_string()));
+            }
         }
 
         // qlmanage writes "<basename>.png" into the output dir; give each

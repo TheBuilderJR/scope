@@ -15,7 +15,8 @@ A clean, native-feeling **light theme** styled after macOS Finder.
 - **List view** with sortable columns (Name · Size · Kind · Date) and a
   macOS-style **column (Miller) view** for drilling through folders.
 - Real **QuickLook thumbnails** rendered inline (image content, PDF first
-  pages, video frames, app icons…), generated lazily and cached on disk.
+  pages, video frames including WMV via FFmpeg, app icons…), generated lazily
+  and cached on disk.
 - A **preview / info pane** with live previews of images, video, audio, PDFs,
   and text/source files, plus full metadata (size, kind, created / modified /
   accessed dates, permissions, path).

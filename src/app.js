@@ -62,7 +62,7 @@ function ext(path) {
 }
 
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "heic"];
-const VID = ["mp4", "mov", "mkv", "webm", "m4v", "avi"];
+const VID = ["mp4", "mov", "mkv", "webm", "m4v", "avi", "wmv"];
 const AUD = ["mp3", "wav", "flac", "aac", "m4a", "ogg"];
 
 function iconFor(entry) {
