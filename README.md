@@ -22,7 +22,7 @@ A clean, native-feeling **light theme** styled after macOS Finder.
   accessed dates, permissions, path).
 - Sidebar of favorites and mounted volumes with custom icons.
 - Clickable breadcrumb path, plus Back / Forward / Up / Home navigation.
-- Keyboard row navigation with Up / Down and Shift-range selection.
+- Arrow-key row and folder navigation, including Shift-range selection.
 - Live name filter; toggle hidden files with the Finder hotkey **⌘⇧.**.
 - Double-click folders to open, files to launch in their default app.
 - **Open** / **Reveal in Finder** actions in the preview pane.

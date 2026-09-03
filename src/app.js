@@ -1246,12 +1246,15 @@ function goForward() {
   }
 }
 
+function goUp() {
+  const from = currentDir;
+  const parent = parentOf(from);
+  if (parent !== from) navigate(parent, false, from);
+}
+
 document.getElementById("nav-back").addEventListener("click", goBack);
 document.getElementById("nav-forward").addEventListener("click", goForward);
-document.getElementById("nav-up").addEventListener("click", () => {
-  const from = currentDir;
-  navigate(parentOf(from), false, from);
-});
+document.getElementById("nav-up").addEventListener("click", goUp);
 document.getElementById("nav-home").addEventListener("click", () => navigate(HOME));
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
 
@@ -1286,11 +1289,14 @@ document.addEventListener("keydown", (ev) => {
       return;
     }
   }
-  // Up/Down navigate the visible rows instead of scrolling the file list.
-  // Leave normal caret behavior intact while the user is editing a field.
+  // Arrow keys navigate the list rather than scrolling it: Up/Down move the
+  // selection, Right enters one selected folder, and Left returns to its
+  // parent. Leave normal caret behavior intact while editing a field.
   const editingField =
     ev.target instanceof HTMLElement &&
     (ev.target.matches("input, textarea, select") || ev.target.isContentEditable);
+  const verticalArrow = ev.code === "ArrowUp" || ev.code === "ArrowDown";
+  const horizontalArrow = ev.code === "ArrowLeft" || ev.code === "ArrowRight";
   if (
     activeView === "finder" &&
     viewMode === "list" &&
@@ -1298,10 +1304,16 @@ document.addEventListener("keydown", (ev) => {
     !ev.metaKey &&
     !ev.ctrlKey &&
     !ev.altKey &&
-    (ev.code === "ArrowUp" || ev.code === "ArrowDown")
+    (verticalArrow || (horizontalArrow && !ev.shiftKey))
   ) {
     ev.preventDefault();
-    moveListSelection(ev.code === "ArrowDown" ? 1 : -1, ev.shiftKey);
+    if (verticalArrow) {
+      moveListSelection(ev.code === "ArrowDown" ? 1 : -1, ev.shiftKey);
+    } else if (ev.code === "ArrowLeft") {
+      goUp();
+    } else if (selectedPaths.size === 1 && selectedEntry?.is_dir && selectedEntry.kind !== "Application") {
+      navigate(selectedEntry.path);
+    }
     return;
   }
   // Toggle hidden files with the Finder hotkey ⌘⇧. (Cmd+Shift+Period)
