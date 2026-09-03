@@ -434,6 +434,10 @@ async function navigate(path, replace = false, selectPath = null, savedHistoryEn
     renderColumns();
   } else {
     renderFiles();
+    // A newly opened list is keyboard-ready immediately. Preserve an explicit
+    // selection (such as the folder reselected by Left/Up); otherwise select
+    // the first row in the actual rendered order.
+    if (!selectedEntry) selectFirstDisplayedRow();
   }
   if (selectedEntry) {
     showPreview(selectedEntry);
@@ -756,6 +760,16 @@ function displayedEntries() {
   return displayedPaths()
     .map((p) => byPath.get(p))
     .filter(Boolean);
+}
+
+function selectFirstDisplayedRow() {
+  const first = displayedEntries()[0];
+  if (!first) return;
+  selectedEntry = first;
+  selectedPath = first.path;
+  selectedPaths = new Set([first.path]);
+  selectAnchor = first.path;
+  refreshRowSelectionClasses();
 }
 
 // Move the primary selection through the rows exactly as they are currently
