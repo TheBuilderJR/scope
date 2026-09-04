@@ -118,7 +118,8 @@ const ICONS = {
     '<path d="M2.5 12 5.4 5.5A2 2 0 0 1 7.2 4.3h9.6a2 2 0 0 1 1.8 1.2L21.5 12v6a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"/><path d="M2.5 12h19"/><path d="M6.5 16h.01"/><path d="M10 16h.01"/>',
   eject: '<path d="m6.5 14 5.5-7 5.5 7z"/><path d="M6.5 18h11"/>',
   spinner: '<path d="M20 12a8 8 0 1 1-2.35-5.65"/>',
-  sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+  sidebarHide: '<path d="M7 4.5v15"/><path d="m16 8-4 4 4 4"/>',
+  sidebarShow: '<path d="M7 4.5v15"/><path d="m12 8 4 4-4 4"/>',
   back: '<path d="M15 18.5 8.5 12 15 5.5"/>',
   forward: '<path d="M9 5.5 15.5 12 9 18.5"/>',
   up: '<path d="M12 20V5"/><path d="M5.5 11 12 4.5 18.5 11"/>',
@@ -310,6 +311,8 @@ function applySidebarState(persist = true) {
   finderBodyEl.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
   finderBodyEl.classList.toggle("sidebar-collapsed", !sidebarVisible);
   toggleSidebarEl.setAttribute("aria-pressed", String(sidebarVisible));
+  toggleSidebarEl.setAttribute("aria-label", sidebarVisible ? "Hide Sidebar" : "Show Sidebar");
+  toggleSidebarEl.innerHTML = svg(sidebarVisible ? "sidebarHide" : "sidebarShow");
   toggleSidebarEl.title = `${sidebarVisible ? "Hide" : "Show"} Sidebar (⌥⌘S)`;
   if (persist) {
     savePref("scope.sidebarWidth", sidebarWidth);
@@ -519,7 +522,7 @@ async function navigate(path, replace = false, selectPath = null, savedHistoryEn
   try {
     listing = await invoke("list_dir", { path });
   } catch (e) {
-    finderStatus.textContent = `⚠ ${e}`;
+    showNavigationError(path, e);
     return;
   }
   restoreHistorySort(savedHistoryEntry);
@@ -565,6 +568,32 @@ async function navigate(path, replace = false, selectPath = null, savedHistoryEn
   // Selection rendering can scroll an item into view; restore the exact saved
   // viewport afterward so Back/Forward does not jump.
   restoreHistoryView(savedHistoryEntry);
+}
+
+function showNavigationError(path, error) {
+  const detail = String(error);
+  finderStatus.textContent = `⚠ ${detail}`;
+  if (!detail.toLowerCase().includes("operation not permitted")) return;
+
+  const location = path.split("/").filter(Boolean).pop() || path;
+  const message = document.createElement("span");
+  message.textContent = `macOS blocked access to ${location}.`;
+  const settingsButton = document.createElement("button");
+  settingsButton.type = "button";
+  settingsButton.className = "status-action";
+  settingsButton.textContent = "Allow Full Disk Access…";
+  settingsButton.title = "Open Privacy & Security settings";
+  settingsButton.addEventListener("click", async () => {
+    try {
+      await invoke("open_full_disk_access_settings");
+      message.textContent = "Add or enable Scope, then reopen it to browse this protected volume.";
+      settingsButton.remove();
+    } catch (settingsError) {
+      message.textContent = `Could not open Privacy & Security: ${settingsError}`;
+      settingsButton.remove();
+    }
+  });
+  finderStatus.replaceChildren(message, settingsButton);
 }
 
 // The parent directory of a path, or "/" at the root.
@@ -1767,7 +1796,6 @@ document.getElementById("nav-up").innerHTML = svg("up");
 document.getElementById("nav-home").innerHTML = svg("home");
 document.getElementById("view-list").innerHTML = svg("list");
 document.getElementById("view-columns").innerHTML = svg("columns");
-toggleSidebarEl.innerHTML = svg("sidebar");
 
 // ---- Sort controls (shared by both views) ----
 

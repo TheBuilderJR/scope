@@ -185,10 +185,6 @@ input[type="search"]:focus {
   padding: 4px 0;
   line-height: 1;
 }
-.view-toggle .sidebar-toggle[aria-pressed="true"] {
-  background: var(--accent-soft);
-  border-color: rgba(10, 99, 206, 0.25);
-}
 .view-toggle .vt.active {
   background: var(--accent);
   color: #fff;
@@ -384,7 +380,8 @@ input[type="search"]:focus {
   display: block;
 }
 .nav-buttons button,
-.view-toggle .vt {
+.view-toggle .vt,
+.view-toggle .sidebar-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -400,6 +397,11 @@ input[type="search"]:focus {
   stroke-linecap: round;
   stroke-linejoin: round;
   display: block;
+}
+.view-toggle .sidebar-toggle svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
 }
 
 /* Shared keyboard focus ring */
@@ -779,6 +781,19 @@ button:focus-visible {
   background: var(--bg-elev);
   color: var(--text-faint);
   font-size: 11px;
+}
+.status-action {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  box-shadow: none;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.status-action:hover {
+  background: var(--accent-soft);
 }
 
 /* Native file drops arrive outside the webview's HTML drag events. The

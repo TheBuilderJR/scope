@@ -906,6 +906,24 @@ fn eject_volume_blocking(path: &str) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn open_full_disk_access_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()
+            .map_err(|e| format!("Could not open System Settings: {e}"))?;
+        status
+            .success()
+            .then_some(())
+            .ok_or_else(|| format!("System Settings exited with {status}"))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Err("Full Disk Access settings are only available on macOS".to_string())
+}
+
 #[derive(Serialize)]
 struct TextPreview {
     is_text: bool,
@@ -1453,6 +1471,7 @@ pub fn run() {
             initial_path,
             mounted_volumes,
             eject_volume,
+            open_full_disk_access_settings,
             read_text_preview,
             stat_path,
             thumbnail,
