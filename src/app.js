@@ -116,6 +116,9 @@ const ICONS = {
     '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
   drive:
     '<path d="M2.5 12 5.4 5.5A2 2 0 0 1 7.2 4.3h9.6a2 2 0 0 1 1.8 1.2L21.5 12v6a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"/><path d="M2.5 12h19"/><path d="M6.5 16h.01"/><path d="M10 16h.01"/>',
+  eject: '<path d="m6.5 14 5.5-7 5.5 7z"/><path d="M6.5 18h11"/>',
+  spinner: '<path d="M20 12a8 8 0 1 1-2.35-5.65"/>',
+  sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
   back: '<path d="M15 18.5 8.5 12 15 5.5"/>',
   forward: '<path d="M9 5.5 15.5 12 9 18.5"/>',
   up: '<path d="M12 20V5"/><path d="M5.5 11 12 4.5 18.5 11"/>',
@@ -234,6 +237,10 @@ const finderSearch = document.getElementById("finder-search");
 const listViewEl = document.getElementById("list-view");
 const columnViewEl = document.getElementById("column-view");
 const previewEl = document.getElementById("preview");
+const finderBodyEl = document.querySelector(".finder-body");
+const sidebarEl = document.querySelector(".sidebar");
+const sidebarResizerEl = document.getElementById("sidebar-resizer");
+const toggleSidebarEl = document.getElementById("toggle-sidebar");
 const dropOverlayEl = document.getElementById("drop-overlay");
 const dropIconEl = document.getElementById("drop-icon");
 const dropOperationEl = document.getElementById("drop-operation");
@@ -269,6 +276,8 @@ let visibleCols = loadPref("scope.visibleCols", {
 });
 let mcolWidth = loadPref("scope.mcolWidth", 230); // Miller column width (px)
 let calcFolderSizes = loadPref("scope.calcFolderSizes", true); // recursive folder sizes
+let sidebarWidth = loadPref("scope.sidebarWidth", 190);
+let sidebarVisible = loadPref("scope.sidebarVisible", true);
 
 function loadPref(key, fallback) {
   try {
@@ -292,6 +301,58 @@ function savePref(key, value) {
     /* ignore quota errors */
   }
 }
+
+const SIDEBAR_MIN = 140;
+const SIDEBAR_MAX = 420;
+
+function applySidebarState(persist = true) {
+  sidebarWidth = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(sidebarWidth) || 190));
+  finderBodyEl.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
+  finderBodyEl.classList.toggle("sidebar-collapsed", !sidebarVisible);
+  toggleSidebarEl.setAttribute("aria-pressed", String(sidebarVisible));
+  toggleSidebarEl.title = `${sidebarVisible ? "Hide" : "Show"} Sidebar (⌥⌘S)`;
+  if (persist) {
+    savePref("scope.sidebarWidth", sidebarWidth);
+    savePref("scope.sidebarVisible", sidebarVisible);
+  }
+}
+
+function toggleSidebar() {
+  sidebarVisible = !sidebarVisible;
+  applySidebarState();
+}
+
+function startSidebarResize(event) {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = sidebarEl.getBoundingClientRect().width;
+  sidebarResizerEl.classList.add("dragging");
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+
+  const onMove = (moveEvent) => {
+    sidebarWidth = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, startWidth + moveEvent.clientX - startX));
+    applySidebarState(false);
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    sidebarResizerEl.classList.remove("dragging");
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    savePref("scope.sidebarWidth", sidebarWidth);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+toggleSidebarEl.addEventListener("click", toggleSidebar);
+sidebarResizerEl.addEventListener("mousedown", startSidebarResize);
+sidebarResizerEl.addEventListener("dblclick", () => {
+  sidebarWidth = 190;
+  applySidebarState();
+});
+applySidebarState(false);
 
 function setAppZoom(value, persist = true) {
   const numeric = Number(value);
@@ -358,21 +419,64 @@ async function initFinder() {
   await navigate(initial || HOME, true);
 }
 
-function addSidebarLocation(parent, { name, path, ico = "drive", title = path }) {
+function addSidebarLocation(parent, { name, path, ico = "drive", title = path, ejectable = false }) {
   const li = document.createElement("li");
   li.dataset.path = path;
   li.tabIndex = 0;
   li.title = title;
   li.setAttribute("role", "button");
-  li.innerHTML = `<span class="ico">${svg(ico)}</span><span>${escapeHtml(name)}</span>`;
+  li.innerHTML = `<span class="ico">${svg(ico)}</span><span class="sidebar-label">${escapeHtml(name)}</span>`;
   li.addEventListener("click", () => navigate(path));
   li.addEventListener("keydown", (e) => {
+    if (e.target !== li) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       navigate(path);
     }
   });
+  if (ejectable) {
+    const ejectButton = document.createElement("button");
+    ejectButton.className = "volume-eject";
+    ejectButton.type = "button";
+    ejectButton.title = `Eject ${name}`;
+    ejectButton.setAttribute("aria-label", `Eject ${name}`);
+    ejectButton.innerHTML = svg("eject");
+    ejectButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void ejectVolume({ name, path }, ejectButton);
+    });
+    li.appendChild(ejectButton);
+  }
   parent.appendChild(li);
+}
+
+const ejectingVolumes = new Set();
+
+async function ejectVolume(volume, button) {
+  if (ejectingVolumes.has(volume.path)) return;
+  ejectingVolumes.add(volume.path);
+  button.disabled = true;
+  button.classList.add("ejecting");
+  button.innerHTML = svg("spinner");
+  finderStatus.textContent = `Ejecting ${volume.name}…`;
+  try {
+    await invoke("eject_volume", { path: volume.path });
+    if (currentDir === volume.path || currentDir?.startsWith(`${volume.path}/`)) {
+      await navigate(HOME);
+    }
+    await refreshVolumes();
+    finderStatus.textContent = `${volume.name} was ejected safely`;
+  } catch (error) {
+    finderStatus.textContent = `⚠ Could not eject ${volume.name}: ${error}`;
+    if (button.isConnected) {
+      button.disabled = false;
+      button.classList.remove("ejecting");
+      button.innerHTML = svg("eject");
+    }
+  } finally {
+    ejectingVolumes.delete(volume.path);
+  }
 }
 
 function buildFavorites() {
@@ -394,6 +498,7 @@ function buildVolumes(volumes) {
       name: volume.name || (volume.path === "/" ? "Macintosh HD" : volume.path.split("/").pop()),
       path: volume.path,
       title: volume.path,
+      ejectable: volume.ejectable,
     });
   }
   locationsTitleEl.classList.toggle("hidden", volumes.length === 0);
@@ -1566,6 +1671,11 @@ document.getElementById("nav-home").addEventListener("click", () => navigate(HOM
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
 
 document.addEventListener("keydown", (ev) => {
+  if (activeView === "finder" && ev.metaKey && ev.altKey && !ev.ctrlKey && ev.code === "KeyS") {
+    ev.preventDefault();
+    toggleSidebar();
+    return;
+  }
   // Browser/Finder-style history navigation: ⌘[ goes back, ⌘] forward.
   // Use `code` so the shortcuts follow the physical bracket keys regardless
   // of the characters produced by the active keyboard layout.
@@ -1657,6 +1767,7 @@ document.getElementById("nav-up").innerHTML = svg("up");
 document.getElementById("nav-home").innerHTML = svg("home");
 document.getElementById("view-list").innerHTML = svg("list");
 document.getElementById("view-columns").innerHTML = svg("columns");
+toggleSidebarEl.innerHTML = svg("sidebar");
 
 // ---- Sort controls (shared by both views) ----
 

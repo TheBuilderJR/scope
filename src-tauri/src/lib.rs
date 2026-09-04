@@ -817,6 +817,11 @@ struct MountedVolume {
     name: String,
     path: String,
     removable: bool,
+    ejectable: bool,
+}
+
+fn mount_is_ejectable(path: &Path, removable: bool) -> bool {
+    path != Path::new("/") && (removable || path.starts_with("/Volumes"))
 }
 
 /// Return the local, user-visible mounted volumes that macOS exposes in
@@ -826,10 +831,14 @@ fn mounted_volumes() -> Vec<MountedVolume> {
     let disks = Disks::new_with_refreshed_list();
     let mut volumes: Vec<MountedVolume> = disks
         .iter()
-        .map(|disk| MountedVolume {
-            name: disk.name().to_string_lossy().to_string(),
-            path: disk.mount_point().to_string_lossy().to_string(),
-            removable: disk.is_removable(),
+        .map(|disk| {
+            let path = disk.mount_point();
+            MountedVolume {
+                name: disk.name().to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                removable: disk.is_removable(),
+                ejectable: mount_is_ejectable(path, disk.is_removable()),
+            }
         })
         .collect();
 
@@ -842,6 +851,59 @@ fn mounted_volumes() -> Vec<MountedVolume> {
         },
     );
     volumes
+}
+
+/// Safely eject a user-visible mounted disk. `diskutil eject` first performs
+/// a non-forced unmount, so open files can veto the operation instead of being
+/// disconnected. The path must exactly match an ejectable mount we enumerate.
+#[tauri::command]
+async fn eject_volume(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || eject_volume_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn eject_volume_blocking(path: &str) -> Result<(), String> {
+    let requested = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+    let disks = Disks::new_with_refreshed_list();
+    let mount = disks
+        .iter()
+        .find_map(|disk| {
+            let mount = disk.mount_point();
+            if !mount_is_ejectable(mount, disk.is_removable()) {
+                return None;
+            }
+            let canonical = std::fs::canonicalize(mount).ok()?;
+            (canonical == requested).then(|| mount.to_path_buf())
+        })
+        .ok_or_else(|| "This path is not an ejectable mounted volume".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/usr/sbin/diskutil")
+            .arg("eject")
+            .arg(&mount)
+            .output()
+            .map_err(|e| format!("Could not start diskutil: {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("diskutil exited with {}", output.status)
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mount;
+        Err("Safe eject is currently supported on macOS".to_string())
+    }
 }
 
 #[derive(Serialize)]
@@ -1390,6 +1452,7 @@ pub fn run() {
             dir_size,
             initial_path,
             mounted_volumes,
+            eject_volume,
             read_text_preview,
             stat_path,
             thumbnail,
@@ -1425,6 +1488,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn only_external_or_removable_mounts_are_ejectable() {
+        assert!(!mount_is_ejectable(Path::new("/"), false));
+        assert!(!mount_is_ejectable(
+            Path::new("/System/Volumes/Data"),
+            false
+        ));
+        assert!(mount_is_ejectable(Path::new("/Volumes/Backup"), false));
+        assert!(mount_is_ejectable(Path::new("/custom/card"), true));
     }
 
     #[test]
