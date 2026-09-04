@@ -97,6 +97,19 @@
         </div>
       </div>
       <footer class="statusbar" id="finder-status"></footer>
+
+      <div id="volume-access-overlay" class="access-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="volume-access-title">
+        <div class="access-card">
+          <div id="volume-access-icon" class="access-icon" aria-hidden="true"></div>
+          <h2 id="volume-access-title">Allow access to this drive</h2>
+          <p id="volume-access-message"></p>
+          <p class="access-help">Open Privacy &amp; Security, add or enable <strong>Scope</strong> under Full Disk Access, then quit and reopen Scope.</p>
+          <div class="access-actions">
+            <button id="volume-access-cancel" type="button">Not Now</button>
+            <button id="volume-access-settings" class="primary" type="button">Open Privacy Settings</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ============================ MONITOR ============================ -->

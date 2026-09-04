@@ -34,6 +34,9 @@
     "category": "Utility",
     "shortDescription": "File browser + system monitor",
     "longDescription": "Scope combines a Finder-style file browser with an Activity-Monitor / htop-style live system monitor in a single GUI.",
+    "macOS": {
+      "signingIdentity": "Developer ID Application: KaoRen, LLC (3C55KB6N72)"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

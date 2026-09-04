@@ -251,6 +251,12 @@ const transferLabelEl = document.getElementById("transfer-label");
 const transferTrackEl = document.getElementById("transfer-track");
 const transferFillEl = document.getElementById("transfer-fill");
 const transferDetailEl = document.getElementById("transfer-detail");
+const volumeAccessOverlayEl = document.getElementById("volume-access-overlay");
+const volumeAccessTitleEl = document.getElementById("volume-access-title");
+const volumeAccessMessageEl = document.getElementById("volume-access-message");
+const volumeAccessCancelEl = document.getElementById("volume-access-cancel");
+const volumeAccessSettingsEl = document.getElementById("volume-access-settings");
+const volumeAccessIconEl = document.getElementById("volume-access-icon");
 
 let viewMode = "list"; // "list" | "columns"
 let hiddenShown = false; // toggled with ⌘⇧. like Finder
@@ -576,6 +582,7 @@ function showNavigationError(path, error) {
   if (!detail.toLowerCase().includes("operation not permitted")) return;
 
   const location = path.split("/").filter(Boolean).pop() || path;
+  showVolumeAccessDialog(location);
   const message = document.createElement("span");
   message.textContent = `macOS blocked access to ${location}.`;
   const settingsButton = document.createElement("button");
@@ -595,6 +602,41 @@ function showNavigationError(path, error) {
   });
   finderStatus.replaceChildren(message, settingsButton);
 }
+
+function showVolumeAccessDialog(location) {
+  volumeAccessTitleEl.textContent = `Allow access to ${location}`;
+  volumeAccessMessageEl.textContent =
+    "macOS is blocking Scope from reading this protected drive. Time Machine destinations require Full Disk Access.";
+  volumeAccessSettingsEl.disabled = false;
+  volumeAccessSettingsEl.textContent = "Open Privacy Settings";
+  volumeAccessOverlayEl.classList.remove("hidden");
+  volumeAccessSettingsEl.focus();
+}
+
+function hideVolumeAccessDialog() {
+  volumeAccessOverlayEl.classList.add("hidden");
+}
+
+volumeAccessCancelEl.addEventListener("click", hideVolumeAccessDialog);
+volumeAccessOverlayEl.addEventListener("click", (event) => {
+  if (event.target === volumeAccessOverlayEl) hideVolumeAccessDialog();
+});
+volumeAccessOverlayEl.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideVolumeAccessDialog();
+});
+volumeAccessSettingsEl.addEventListener("click", async () => {
+  volumeAccessSettingsEl.disabled = true;
+  try {
+    await invoke("open_full_disk_access_settings");
+    volumeAccessMessageEl.textContent =
+      "Privacy & Security is open. Add or enable Scope, then quit and reopen it for the change to take effect.";
+    volumeAccessSettingsEl.textContent = "Settings Open";
+  } catch (error) {
+    volumeAccessMessageEl.textContent = `Could not open Privacy & Security: ${error}`;
+    volumeAccessSettingsEl.disabled = false;
+    volumeAccessSettingsEl.textContent = "Try Again";
+  }
+});
 
 // The parent directory of a path, or "/" at the root.
 function parentOf(p) {
@@ -1796,6 +1838,7 @@ document.getElementById("nav-up").innerHTML = svg("up");
 document.getElementById("nav-home").innerHTML = svg("home");
 document.getElementById("view-list").innerHTML = svg("list");
 document.getElementById("view-columns").innerHTML = svg("columns");
+volumeAccessIconEl.innerHTML = svg("drive");
 
 // ---- Sort controls (shared by both views) ----
 

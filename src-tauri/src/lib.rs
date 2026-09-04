@@ -911,7 +911,7 @@ fn open_full_disk_access_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let status = std::process::Command::new("/usr/bin/open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .arg("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles")
             .status()
             .map_err(|e| format!("Could not open System Settings: {e}"))?;
         status
