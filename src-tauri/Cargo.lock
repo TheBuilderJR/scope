@@ -2887,9 +2887,10 @@ dependencies = [
 
 [[package]]
 name = "scope"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "objc2-app-kit",
+ "plist",
  "serde",
  "serde_json",
  "sysinfo",

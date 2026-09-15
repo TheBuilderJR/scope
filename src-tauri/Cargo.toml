@@ -1,6 +1,6 @@
 [package]
 name = "scope"
-version = "0.1.0"
+version = "0.1.1"
 description = "Scope - a combined file browser and system monitor"
 authors = ["bobrenjc93"]
 edition = "2021"
@@ -27,6 +27,7 @@ sysinfo = "0.33"
 trash = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent"] }
 
 [profile.release]

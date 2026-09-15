@@ -26,6 +26,22 @@ A clean, native-feeling **light theme** styled after macOS Finder.
 - Live name filter; toggle hidden files with the Finder hotkey **⌘⇧.**.
 - Double-click folders to open, files to launch in their default app.
 - **Open** / **Reveal in Finder** actions in the preview pane.
+- Right-click a file or folder to **Copy Absolute Path** in either view.
+  Multiple selected items copy one absolute path per line.
+- **Size on disk** uses allocated blocks (`st_blocks × 512` on macOS), so
+  sparse files contribute only their allocated space to folder totals and size
+  sorting. File previews also show logical size. Folder totals count hard links
+  once and do not follow symlinks. Sizes use binary units (KiB, MiB, GiB).
+- Drag files between Scope windows: move on the same drive, copy between
+  drives, or hold Option to copy. Permission failures retry the remaining
+  selection through Finder as a batch (one command per copy/move operation),
+  which handles macOS authentication and displays transfer progress. Allow
+  Scope to control Finder when macOS asks; if previously denied, enable it
+  under System Settings → Privacy & Security → Automation. Existing files
+  are never replaced by the Finder retry; Finder may report a name conflict.
+- Safe eject releases media previews in all Scope windows, checks the macOS
+  mount information, and uses Finder if the standard eject needs assistance.
+  Active Scope transfers block eject; successful eject refreshes every window.
 
 ### 📊 Monitor (htop-like, all in one view)
 - Live **time-series graphs** for CPU, memory, and network throughput
@@ -66,6 +82,15 @@ cargo tauri dev
 
 The frontend is plain HTML/CSS/JS in `src/` — there is **no npm/Node build
 step**.
+
+The signed macOS bundle includes Apple's [Apple Events entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events)
+and an Automation usage description for permission-assisted Finder transfers.
+
+Run backend tests with `cargo test --manifest-path src-tauri/Cargo.toml`.
+The optional Finder integration test launches Finder and uses temporary files:
+`cargo test --manifest-path src-tauri/Cargo.toml finder_transfer_copies_and_moves_literal_filenames_without_overwriting -- --ignored`.
+To test both eject paths using a disposable disk image:
+`cargo test --manifest-path src-tauri/Cargo.toml ejects_temporary_disk_image_with_diskutil_and_finder -- --ignored`.
 
 ## Installing the CLI
 

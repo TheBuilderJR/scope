@@ -127,7 +127,7 @@ fn list_dir(path: String) -> Result<DirListing, String> {
         let meta = if is_symlink {
             std::fs::metadata(&p).ok()
         } else {
-            sym_meta
+            sym_meta.clone()
         };
         let is_dir = meta
             .as_ref()
@@ -136,7 +136,7 @@ fn list_dir(path: String) -> Result<DirListing, String> {
         let size = if is_dir {
             0
         } else {
-            meta.as_ref().map(|m| m.len()).unwrap_or(0)
+            sym_meta.as_ref().map(allocated_size).unwrap_or(0)
         };
         let modified = meta
             .as_ref()
@@ -185,6 +185,34 @@ fn open_path(path: String) -> Result<(), String> {
 #[tauri::command]
 fn reveal_in_finder(path: String) -> Result<(), String> {
     open_with(&["-R", "--", &path])
+}
+
+#[tauri::command]
+async fn copy_absolute_paths(paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() || paths.iter().any(|path| !Path::new(path).is_absolute()) {
+        return Err("Select an item with an absolute path.".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        // Send literal UTF-8 paths over stdin, preserving spaces and symlinks.
+        let mut child = std::process::Command::new("/usr/bin/pbcopy")
+            .env("LC_CTYPE", "en_US.UTF-8")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let write_result = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(paths.join("\n").as_bytes());
+        let status = child.wait().map_err(|error| error.to_string())?;
+        write_result.map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!("Clipboard write failed: {status}"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Move files/folders to the system Trash (recoverable, with Finder put-back),
@@ -283,6 +311,7 @@ struct PlannedTransfer {
     source_directory: PathBuf,
     operation: TransferOperation,
     totals: TransferTotals,
+    needs_finder: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -390,10 +419,24 @@ fn transfer_paths_blocking<F>(
     paths: Vec<String>,
     destination: String,
     force_copy: bool,
-    mut emit: F,
+    emit: F,
 ) -> Result<TransferSummary, String>
 where
     F: FnMut(TransferProgress),
+{
+    transfer_paths_with_finder(paths, destination, force_copy, emit, finder_transfer)
+}
+
+fn transfer_paths_with_finder<F, R>(
+    paths: Vec<String>,
+    destination: String,
+    force_copy: bool,
+    mut emit: F,
+    mut retry: R,
+) -> Result<TransferSummary, String>
+where
+    F: FnMut(TransferProgress),
+    R: FnMut(&[PlannedTransfer]) -> Result<Vec<PathBuf>, String>,
 {
     if paths.is_empty() {
         return Err("No files were dropped".to_string());
@@ -466,7 +509,15 @@ where
         }
 
         let mut path_totals = TransferTotals::default();
-        measure_transfer(&source, &mut path_totals)?;
+        let needs_finder = match measure_transfer(&source, &mut path_totals) {
+            Ok(()) => false,
+            Err(error) if finder_can_retry(&error) => {
+                // Finder can read protected descendants after authentication.
+                path_totals = TransferTotals { bytes: 0, items: 1 };
+                true
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         totals.bytes = totals.bytes.saturating_add(path_totals.bytes);
         totals.items = totals.items.saturating_add(path_totals.items);
         emit(TransferProgress {
@@ -487,6 +538,7 @@ where
             source_directory,
             operation,
             totals: path_totals,
+            needs_finder,
         });
     }
 
@@ -507,44 +559,81 @@ where
 
     let mut copied_targets: Vec<PathBuf> = Vec::new();
     let mut moved_paths: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for item in &planned {
+    let mut actual_destinations = Vec::new();
+    for (index, item) in planned.iter().enumerate() {
         state.operation = item.operation.as_str();
         state.current = item.source.to_string_lossy().to_string();
-        let result = match item.operation {
-            TransferOperation::Copy => {
-                let mut root_created = false;
-                let result = copy_entry(
+        let before_bytes = state.transferred_bytes;
+        let before_items = state.transferred_items;
+        let mut root_created = false;
+        let actual_target = item.target.clone();
+        let mut result = if item.needs_finder {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        } else {
+            match item.operation {
+                TransferOperation::Copy => copy_entry(
                     &item.source,
                     &item.target,
                     &mut state,
                     &mut root_created,
                     true,
-                );
-                if root_created {
-                    copied_targets.push(item.target.clone());
-                }
-                result
-            }
-            TransferOperation::Move => {
-                let result = std::fs::rename(&item.source, &item.target)
-                    .map_err(|e| format!("{}: {e}", item.source.display()));
-                if result.is_ok() {
-                    moved_paths.push((item.source.clone(), item.target.clone()));
-                    state.transferred_bytes =
-                        state.transferred_bytes.saturating_add(item.totals.bytes);
-                    state.transferred_items =
-                        state.transferred_items.saturating_add(item.totals.items);
-                    state.update(true);
-                }
-                result
+                ),
+                TransferOperation::Move => std::fs::rename(&item.source, &item.target)
+                    .map_err(|e| transfer_io_error(&item.source, e)),
             }
         };
 
-        if let Err(mut error) = result {
-            // Roll back only paths created by this operation, so a failed
-            // multi-item drop is not left half transferred.
+        if result.as_ref().is_err_and(finder_can_retry) {
+            // Never let Finder merge into a partial copy, or retry after failed cleanup.
+            if root_created {
+                match remove_copied_path(&item.target) {
+                    Ok(()) => root_created = false,
+                    Err(error) => {
+                        result = Err(std::io::Error::other(format!(
+                        "Could not remove incomplete copy {}: {error}. Transfer was not retried.",
+                        item.target.display()
+                    )))
+                    }
+                }
+            }
+            if !root_created {
+                (state.emit)(TransferProgress {
+                    phase: "authorizing",
+                    operation: item.operation.as_str(),
+                    transferred_bytes: before_bytes,
+                    total_bytes: state.totals.bytes,
+                    transferred_items: before_items,
+                    total_items: state.totals.items,
+                    current: item.source.to_string_lossy().to_string(),
+                });
+                // A single Finder command carries the remaining selection, so
+                // authorization applies to the batch instead of each file.
+                match retry(&planned[index..]) {
+                    Ok(targets) if targets.len() == planned.len() - index => {
+                        actual_destinations.extend(targets.iter().map(|path| path.to_string_lossy().into_owned()));
+                        state.transferred_bytes = state.totals.bytes;
+                        state.transferred_items = state.totals.items;
+                        state.update(true);
+                        break;
+                    }
+                    Ok(_) => result = Err(std::io::Error::other("Finder returned an incomplete batch result. Check the destination before retrying.")),
+                    Err(error) => result = Err(std::io::Error::other(error)),
+                }
+            }
+        }
+
+        if root_created {
+            copied_targets.push(actual_target.clone());
+        }
+        if let Err(error) = result {
+            let mut error = error.to_string();
             for copied in copied_targets.iter().rev() {
-                remove_copied_path(copied);
+                if let Err(rollback_error) = remove_copied_path(copied) {
+                    error.push_str(&format!(
+                        "; could not remove incomplete copy {}: {rollback_error}",
+                        copied.display()
+                    ));
+                }
             }
             for (source, target) in moved_paths.iter().rev() {
                 if let Err(rollback_error) = std::fs::rename(target, source) {
@@ -556,6 +645,13 @@ where
             }
             return Err(error);
         }
+        if item.operation == TransferOperation::Move {
+            moved_paths.push((item.source.clone(), actual_target.clone()));
+        }
+        actual_destinations.push(actual_target.to_string_lossy().to_string());
+        state.transferred_bytes = before_bytes.saturating_add(item.totals.bytes);
+        state.transferred_items = before_items.saturating_add(item.totals.items);
+        state.update(true);
     }
 
     let operation = combined_operation(planned.iter().map(|item| item.operation)).to_string();
@@ -570,31 +666,30 @@ where
         operation,
         transferred_bytes: state.transferred_bytes,
         transferred_items: state.transferred_items,
-        destinations: planned
-            .iter()
-            .map(|item| item.target.to_string_lossy().to_string())
-            .collect(),
+        destinations: actual_destinations,
         source_directories: source_directories.into_iter().collect(),
     })
 }
 
-fn measure_transfer(path: &Path, totals: &mut TransferTotals) -> Result<(), String> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+fn measure_transfer(path: &Path, totals: &mut TransferTotals) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| transfer_io_error(path, e))?;
     totals.items = totals.items.saturating_add(1);
     if metadata.file_type().is_symlink() {
         return Ok(());
     }
     if metadata.is_dir() {
-        let entries = std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let entries = std::fs::read_dir(path).map_err(|e| transfer_io_error(path, e))?;
         for entry in entries {
-            let entry = entry.map_err(|e| format!("{}: {e}", path.display()))?;
+            let entry = entry.map_err(|e| transfer_io_error(path, e))?;
             measure_transfer(&entry.path(), totals)?;
         }
     } else if metadata.is_file() {
         totals.bytes = totals.bytes.saturating_add(metadata.len());
     } else {
-        return Err(format!("Unsupported file type: {}", path.display()));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("Unsupported file type: {}", path.display()),
+        ));
     }
     Ok(())
 }
@@ -605,12 +700,11 @@ fn copy_entry<F>(
     state: &mut TransferState<'_, F>,
     root_created: &mut bool,
     is_root: bool,
-) -> Result<(), String>
+) -> std::io::Result<()>
 where
     F: FnMut(TransferProgress),
 {
-    let metadata =
-        std::fs::symlink_metadata(source).map_err(|e| format!("{}: {e}", source.display()))?;
+    let metadata = std::fs::symlink_metadata(source).map_err(|e| transfer_io_error(source, e))?;
     state.current = source.to_string_lossy().to_string();
 
     if metadata.file_type().is_symlink() {
@@ -624,14 +718,13 @@ where
     }
 
     if metadata.is_dir() {
-        std::fs::create_dir(target).map_err(|e| format!("{}: {e}", target.display()))?;
+        std::fs::create_dir(target).map_err(|e| transfer_io_error(target, e))?;
         if is_root {
             *root_created = true;
         }
-        let entries =
-            std::fs::read_dir(source).map_err(|e| format!("{}: {e}", source.display()))?;
+        let entries = std::fs::read_dir(source).map_err(|e| transfer_io_error(source, e))?;
         for entry in entries {
-            let entry = entry.map_err(|e| format!("{}: {e}", source.display()))?;
+            let entry = entry.map_err(|e| transfer_io_error(source, e))?;
             copy_entry(
                 &entry.path(),
                 &target.join(entry.file_name()),
@@ -642,19 +735,19 @@ where
         }
         // Apply restrictive source permissions only after the children exist.
         std::fs::set_permissions(target, metadata.permissions())
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+            .map_err(|e| transfer_io_error(target, e))?;
         state.transferred_items = state.transferred_items.saturating_add(1);
         state.update(false);
         return Ok(());
     }
 
     if metadata.is_file() {
-        let mut input = File::open(source).map_err(|e| format!("{}: {e}", source.display()))?;
+        let mut input = File::open(source).map_err(|e| transfer_io_error(source, e))?;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(target)
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+            .map_err(|e| transfer_io_error(target, e))?;
         if is_root {
             *root_created = true;
         }
@@ -662,43 +755,44 @@ where
         loop {
             let count = input
                 .read(&mut buffer)
-                .map_err(|e| format!("{}: {e}", source.display()))?;
+                .map_err(|e| transfer_io_error(source, e))?;
             if count == 0 {
                 break;
             }
             output
                 .write_all(&buffer[..count])
-                .map_err(|e| format!("{}: {e}", target.display()))?;
+                .map_err(|e| transfer_io_error(target, e))?;
             state.transferred_bytes = state.transferred_bytes.saturating_add(count as u64);
             state.update(false);
         }
-        output
-            .flush()
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+        output.flush().map_err(|e| transfer_io_error(target, e))?;
         std::fs::set_permissions(target, metadata.permissions())
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+            .map_err(|e| transfer_io_error(target, e))?;
         state.transferred_items = state.transferred_items.saturating_add(1);
         state.update(false);
         return Ok(());
     }
 
-    Err(format!("Unsupported file type: {}", source.display()))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("Unsupported file type: {}", source.display()),
+    ))
 }
 
-fn copy_symlink(source: &Path, target: &Path) -> Result<(), String> {
-    let link = std::fs::read_link(source).map_err(|e| format!("{}: {e}", source.display()))?;
+fn copy_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    let link = std::fs::read_link(source).map_err(|e| transfer_io_error(source, e))?;
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(link, target).map_err(|e| format!("{}: {e}", target.display()))
+        std::os::unix::fs::symlink(link, target).map_err(|e| transfer_io_error(target, e))
     }
     #[cfg(windows)]
     {
         if source.is_dir() {
             std::os::windows::fs::symlink_dir(link, target)
-                .map_err(|e| format!("{}: {e}", target.display()))
+                .map_err(|e| transfer_io_error(target, e))
         } else {
             std::os::windows::fs::symlink_file(link, target)
-                .map_err(|e| format!("{}: {e}", target.display()))
+                .map_err(|e| transfer_io_error(target, e))
         }
     }
 }
@@ -752,15 +846,66 @@ fn unique_copy_target(
     unreachable!()
 }
 
-fn remove_copied_path(path: &Path) {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return;
+fn remove_copied_path(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        let _ = std::fs::remove_dir_all(path);
+        std::fs::remove_dir_all(path)
     } else {
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path)
     }
+}
+
+fn transfer_io_error(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+fn finder_can_retry(error: &std::io::Error) -> bool {
+    cfg!(target_os = "macos") && error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+#[cfg(target_os = "macos")]
+fn finder_transfer(items: &[PlannedTransfer]) -> Result<Vec<PathBuf>, String> {
+    let first = items.first().ok_or("Empty Finder batch")?;
+    // Paths are argv data, never interpolated into AppleScript or a shell.
+    let destination = first.target.parent().ok_or("Missing destination folder")?;
+    let mut command = std::process::Command::new("/usr/bin/osascript");
+    command
+        .args(["-e", include_str!("finder_transfer.applescript")])
+        .arg(destination);
+    for item in items {
+        if item.target.parent() != Some(destination) {
+            return Err("Finder batch destinations must match".to_string());
+        }
+        command.arg(item.operation.as_str()).arg(&item.source);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Finder transfer: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(if detail.contains("(-1743)") {
+            "Allow Scope to control Finder in System Settings → Privacy & Security → Automation, then try again.".to_string()
+        } else if detail.contains("(-128)") {
+            "Transfer canceled in Finder. Check the destination for any incomplete copy."
+                .to_string()
+        } else {
+            format!("Finder could not complete the transfer: {}. Check the destination before retrying.", detail.trim())
+        });
+    }
+    serde_json::from_slice::<Vec<PathBuf>>(&output.stdout).map_err(|error| {
+        format!(
+            "Could not read Finder batch result: {error}. Check the destination before retrying."
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn finder_transfer(_items: &[PlannedTransfer]) -> Result<Vec<PathBuf>, String> {
+    Err("Finder permission approval is only available on macOS".to_string())
 }
 
 /// Recursively sum the on-disk size of a directory's contents (like Finder's
@@ -773,23 +918,43 @@ async fn dir_size(path: String) -> Result<u64, String> {
         .map_err(|e| e.to_string())
 }
 
-fn dir_size_walk(path: &Path) -> u64 {
-    let mut total: u64 = 0;
-    let Ok(rd) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    for entry in rd.flatten() {
-        // file_type()/metadata() on a DirEntry do not follow symlinks.
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            continue;
-        } else if ft.is_dir() {
-            total = total.saturating_add(dir_size_walk(&entry.path()));
-        } else if let Ok(m) = entry.metadata() {
-            total = total.saturating_add(m.len());
-        }
+/// Filesystem allocation, not the logical length of sparse/compressed files.
+fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.blocks().saturating_mul(512)
     }
-    total
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
+}
+
+fn dir_size_walk(path: &Path) -> u64 {
+    fn walk(path: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return 0;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Count hard-linked files once, like du, and never follow symlinks.
+            if !seen.insert((metadata.dev(), metadata.ino())) {
+                return 0;
+            }
+        }
+        let mut total = allocated_size(&metadata);
+        if metadata.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    total = total.saturating_add(walk(&entry.path(), seen));
+                }
+            }
+        }
+        total
+    }
+    walk(path, &mut HashSet::new())
 }
 
 fn open_with(args: &[&str]) -> Result<(), String> {
@@ -855,7 +1020,7 @@ fn mounted_volumes() -> Vec<MountedVolume> {
 
 /// Safely eject a user-visible mounted disk. `diskutil eject` first performs
 /// a non-forced unmount, so open files can veto the operation instead of being
-/// disconnected. The path must exactly match an ejectable mount we enumerate.
+/// disconnected. The path must exactly match an ejectable mount reported by macOS.
 #[tauri::command]
 async fn eject_volume(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || eject_volume_blocking(&path))
@@ -864,22 +1029,23 @@ async fn eject_volume(path: String) -> Result<(), String> {
 }
 
 fn eject_volume_blocking(path: &str) -> Result<(), String> {
-    let requested = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
-    let disks = Disks::new_with_refreshed_list();
-    let mount = disks
-        .iter()
-        .find_map(|disk| {
-            let mount = disk.mount_point();
-            if !mount_is_ejectable(mount, disk.is_removable()) {
-                return None;
-            }
-            let canonical = std::fs::canonicalize(mount).ok()?;
-            (canonical == requested).then(|| mount.to_path_buf())
-        })
-        .ok_or_else(|| "This path is not an ejectable mounted volume".to_string())?;
-
     #[cfg(target_os = "macos")]
     {
+        let requested = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+        let info = std::process::Command::new("/usr/sbin/diskutil")
+            .args(["info", "-plist"])
+            .arg(&requested)
+            .output()
+            .map_err(|error| format!("Could not inspect mounted disk: {error}"))?;
+        if !info.status.success() {
+            return Err(format!(
+                "Could not inspect mounted disk: {}",
+                String::from_utf8_lossy(&info.stderr).trim()
+            ));
+        }
+        let info = plist::Value::from_reader_xml(std::io::Cursor::new(info.stdout))
+            .map_err(|error| format!("Could not read mounted disk information: {error}"))?;
+        let mount = validated_eject_mount(&requested, &info)?;
         let output = std::process::Command::new("/usr/sbin/diskutil")
             .arg("eject")
             .arg(&mount)
@@ -890,20 +1056,54 @@ fn eject_volume_blocking(path: &str) -> Result<(), String> {
         }
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Err(if !stderr.is_empty() {
+        let detail = if !stderr.is_empty() {
             stderr
         } else if !stdout.is_empty() {
             stdout
         } else {
             format!("diskutil exited with {}", output.status)
-        })
+        };
+        let finder = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", include_str!("finder_eject.applescript")])
+            .arg(&mount)
+            .current_dir("/")
+            .output()
+            .map_err(|error| format!("{detail}; could not ask Finder to eject: {error}"))?;
+        if finder.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{detail}; Finder: {}",
+                String::from_utf8_lossy(&finder.stderr).trim()
+            ))
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = mount;
+        let _ = path;
         Err("Safe eject is currently supported on macOS".to_string())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn validated_eject_mount(requested: &Path, info: &plist::Value) -> Result<PathBuf, String> {
+    let fields = info
+        .as_dictionary()
+        .ok_or("Invalid mounted disk information")?;
+    let mount = fields
+        .get("MountPoint")
+        .and_then(plist::Value::as_string)
+        .ok_or("This disk is not mounted")?;
+    let mount = std::fs::canonicalize(mount).map_err(|error| error.to_string())?;
+    let ejectable = fields
+        .get("Ejectable")
+        .and_then(plist::Value::as_boolean)
+        .unwrap_or(false);
+    if mount != requested || !mount_is_ejectable(&mount, ejectable) {
+        return Err("This path is not an ejectable mounted volume".to_string());
+    }
+    Ok(mount)
 }
 
 #[tauri::command]
@@ -968,6 +1168,7 @@ struct PathInfo {
     is_symlink: bool,
     kind: String,
     size: u64,
+    logical_size: u64,
     item_count: Option<usize>,
     modified: Option<i64>,
     created: Option<i64>,
@@ -1010,8 +1211,16 @@ fn stat_path(path: String) -> Result<PathInfo, String> {
             .unwrap_or_else(|| path.clone()),
         kind: describe_kind(&p, is_dir),
         is_dir,
-        is_symlink: sym.map(|m| m.file_type().is_symlink()).unwrap_or(false),
-        size: if is_dir { 0 } else { meta.len() },
+        is_symlink: sym
+            .as_ref()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        size: if is_dir {
+            0
+        } else {
+            allocated_size(sym.as_ref().unwrap_or(&meta))
+        },
+        logical_size: sym.as_ref().unwrap_or(&meta).len(),
         item_count,
         modified: systime_secs(meta.modified()),
         created: systime_secs(meta.created()),
@@ -1368,12 +1577,12 @@ fn kill_process(state: tauri::State<AppState>, pid: u32) -> Result<bool, String>
 
 /// Pull the first non-flag argument (skipping the executable name) and resolve
 /// it to an absolute, canonical path if possible.
-fn parse_path_arg(argv: &[String]) -> Option<String> {
+fn parse_path_arg(argv: &[String], cwd: &Path) -> Option<String> {
     for arg in argv.iter().skip(1) {
         if arg.starts_with('-') {
             continue;
         }
-        let p = PathBuf::from(arg);
+        let p = cwd.join(arg);
         let resolved = std::fs::canonicalize(&p).unwrap_or(p);
         return Some(resolved.to_string_lossy().to_string());
     }
@@ -1396,6 +1605,13 @@ fn present_window(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A CLI launch from an external disk must not pin that disk as our cwd.
+    // Resolve the requested folder before moving off the launch directory.
+    let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let initial = parse_path_arg(&std::env::args().collect::<Vec<_>>(), &launch_cwd);
+    if let Err(error) = std::env::set_current_dir("/") {
+        eprintln!("scope: could not release launch directory: {error}");
+    }
     let state = AppState {
         // Keep launch cheap. CPU, memory, processes, and network interfaces are
         // populated lazily when the user first opens the Monitor tab.
@@ -1411,7 +1627,7 @@ pub fn run() {
             // while the single-instance plugin keeps every window in the same
             // app process (matching Finder's behavior).
             let label = format!("scope-{}", NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed));
-            if let Some(path) = parse_path_arg(&argv) {
+            if let Some(path) = parse_path_arg(&argv, Path::new(&_cwd)) {
                 app.state::<AppState>()
                     .initial_paths
                     .lock()
@@ -1444,10 +1660,8 @@ pub fn run() {
             }
         }))
         .manage(state)
-        .setup(|app| {
-            // Record any folder passed on the command line at first launch.
-            let args: Vec<String> = std::env::args().collect();
-            if let Some(path) = parse_path_arg(&args) {
+        .setup(move |app| {
+            if let Some(path) = initial {
                 app.state::<AppState>()
                     .initial_paths
                     .lock()
@@ -1464,6 +1678,7 @@ pub fn run() {
             list_dir,
             open_path,
             reveal_in_finder,
+            copy_absolute_paths,
             move_to_trash,
             transfer_operation,
             transfer_paths,
@@ -1507,6 +1722,53 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sparse_sizes_use_allocated_blocks_in_listings_previews_and_folder_totals() {
+        use std::io::{Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
+        let root = TestDir::new();
+        let nested = root.0.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let path = nested.join("sparse.raw");
+        let mut file = File::create(&path).unwrap();
+        let logical = 256_u64 * 1024 * 1024 * 1024;
+        file.set_len(logical).unwrap();
+        file.seek(SeekFrom::Start(logical - 4096)).unwrap();
+        file.write_all(&[1; 4096]).unwrap();
+        file.sync_all().unwrap();
+        let metadata = file.metadata().unwrap();
+        let allocated = metadata.blocks() * 512;
+        assert!(allocated < logical / 100);
+        let listing = list_dir(nested.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(listing.entries[0].size, allocated);
+        let preview = stat_path(path.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(preview.size, allocated);
+        assert_eq!(preview.logical_size, logical);
+        std::fs::hard_link(&path, nested.join("hard-link.raw")).unwrap();
+        let link = nested.join("symlink.raw");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let expected = allocated
+            + std::fs::metadata(&root.0).unwrap().blocks() * 512
+            + std::fs::metadata(&nested).unwrap().blocks() * 512
+            + std::fs::symlink_metadata(&link).unwrap().blocks() * 512;
+        assert_eq!(dir_size_walk(&root.0), expected);
+        let output = std::process::Command::new("/usr/bin/du")
+            .args(["-sk"])
+            .arg(&root.0)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let du_kib: u64 = String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(expected.div_ceil(1024), du_kib);
     }
 
     #[test]
@@ -1592,6 +1854,278 @@ mod tests {
         assert_eq!(
             progress.last().unwrap().transferred_bytes,
             progress.last().unwrap().total_bytes
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn permission_retry_removes_partial_copy_and_resets_progress() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TestDir::new();
+        let source = root.0.join("source");
+        let destination = root.0.join("destination");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let protected = source.join("private.txt");
+        std::fs::write(&protected, b"private").unwrap();
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0)).unwrap();
+        let mut retries = 0;
+        let mut events = Vec::new();
+        let result = transfer_paths_with_finder(
+            vec![source.to_string_lossy().into_owned()],
+            destination.to_string_lossy().into_owned(),
+            true,
+            |event| events.push(event),
+            |items| {
+                let item = &items[0];
+                retries += 1;
+                assert!(
+                    !item.target.exists(),
+                    "partial directory must be removed first"
+                );
+                std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                std::fs::create_dir(&item.target).unwrap();
+                std::fs::copy(&protected, item.target.join("private.txt")).unwrap();
+                Ok(vec![item.target.clone()])
+            },
+        );
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let summary = result.unwrap();
+        assert_eq!(retries, 1);
+        assert_eq!(summary.transferred_bytes, 7);
+        assert_eq!(summary.transferred_items, 2);
+        assert!(events.iter().any(|event| event.phase == "authorizing"));
+        assert_eq!(
+            std::fs::read(destination.join("source/private.txt")).unwrap(),
+            b"private"
+        );
+        assert!(source.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unwritable_destination_requests_finder_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TestDir::new();
+        let source = root.0.join("source.txt");
+        let destination = root.0.join("destination");
+        let second = root.0.join("second.txt");
+        std::fs::write(&second, b"second").unwrap();
+        std::fs::write(&source, b"copy me").unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut retries = 0;
+        let result = transfer_paths_with_finder(
+            vec![
+                source.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            destination.to_string_lossy().into_owned(),
+            true,
+            |_| {},
+            |items| {
+                retries += 1;
+                assert_eq!(items.len(), 2, "send the whole remaining batch once");
+                std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                let targets = items
+                    .iter()
+                    .map(|item| {
+                        assert!(!item.target.exists());
+                        std::fs::copy(&item.source, &item.target).unwrap();
+                        item.target.clone()
+                    })
+                    .collect();
+                Ok(targets)
+            },
+        );
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(retries, 1);
+        assert_eq!(result.unwrap().destinations.len(), 2);
+        assert_eq!(
+            std::fs::read(destination.join("second.txt")).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("source.txt")).unwrap(),
+            b"copy me"
+        );
+        assert!(source.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn permission_retry_cancellation_restores_earlier_moves() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TestDir::new();
+        let source = root.0.join("first.txt");
+        let protected = root.0.join("protected");
+        let destination = root.0.join("destination");
+        std::fs::write(&source, b"keep").unwrap();
+        std::fs::create_dir(&protected).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0)).unwrap();
+        let result = transfer_paths_with_finder(
+            vec![
+                source.to_string_lossy().into_owned(),
+                protected.to_string_lossy().into_owned(),
+            ],
+            destination.to_string_lossy().into_owned(),
+            false,
+            |_| {},
+            |_| Err("Transfer canceled in Finder".to_string()),
+        );
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.unwrap_err().contains("canceled"));
+        assert_eq!(std::fs::read(&source).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn missing_sources_never_request_permission() {
+        let root = TestDir::new();
+        let result = transfer_paths_with_finder(
+            vec![root.0.join("missing").to_string_lossy().into_owned()],
+            root.0.to_string_lossy().into_owned(),
+            true,
+            |_| {},
+            |_| panic!("non-permission errors must not launch Finder"),
+        );
+        assert!(result.is_err());
+        assert!(!finder_can_retry(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(!finder_can_retry(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "launches Finder; run manually for macOS integration verification"]
+    fn finder_transfer_copies_and_moves_literal_filenames_without_overwriting() {
+        let root = TestDir::new();
+        let destination = root.0.join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        let mut items = Vec::new();
+        for name in [
+            "literal \"quotes\" '$() Unicode é.txt",
+            "line\nbreak 🐈.txt",
+        ] {
+            let source = root.0.join(name);
+            std::fs::write(&source, b"original").unwrap();
+            items.push(PlannedTransfer {
+                target: destination.join(name),
+                source,
+                source_directory: root.0.clone(),
+                operation: TransferOperation::Copy,
+                totals: TransferTotals::default(),
+                needs_finder: true,
+            });
+        }
+        let copied = finder_transfer(&items).unwrap();
+        assert_eq!(copied.len(), 2);
+        for item in &items {
+            assert_eq!(std::fs::read(&item.target).unwrap(), b"original");
+            assert!(item.source.exists());
+            std::fs::write(&item.source, b"changed").unwrap();
+        }
+        let _ = finder_transfer(&items);
+        for path in &copied {
+            assert_eq!(std::fs::read(path).unwrap(), b"original");
+        }
+        let move_destination = root.0.join("move destination");
+        std::fs::create_dir(&move_destination).unwrap();
+        for item in &mut items {
+            item.target = move_destination.join(item.source.file_name().unwrap());
+            item.operation = TransferOperation::Move;
+        }
+        let moved = finder_transfer(&items).unwrap();
+        assert_eq!(moved.len(), 2);
+        for path in moved {
+            assert_eq!(std::fs::read(path).unwrap(), b"changed");
+        }
+        assert!(items.iter().all(|item| !item.source.exists()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "creates and ejects a temporary disk image; run manually on macOS"]
+    fn ejects_temporary_disk_image_with_diskutil_and_finder() {
+        use std::process::Command;
+        let root = TestDir::new();
+        let image = root.0.join("eject-test.dmg");
+        let name = format!("ScopeEjectTest{}", std::process::id());
+        let mount = PathBuf::from("/Volumes").join(&name);
+        assert!(!mount.exists());
+        assert!(Command::new("/usr/bin/hdiutil")
+            .args(["create", "-size", "32m", "-fs", "HFS+", "-volname", &name])
+            .arg(&image)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        for use_finder in [false, true] {
+            assert!(Command::new("/usr/bin/hdiutil")
+                .args(["attach", "-nobrowse"])
+                .arg(&image)
+                .output()
+                .unwrap()
+                .status
+                .success());
+            let result = if use_finder {
+                let output = Command::new("/usr/bin/osascript")
+                    .args(["-e", include_str!("finder_eject.applescript")])
+                    .arg(&mount)
+                    .output()
+                    .unwrap();
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(String::from_utf8_lossy(&output.stderr).into_owned())
+                }
+            } else {
+                eject_volume_blocking(mount.to_str().unwrap())
+            };
+            let unmounted = !mount.exists();
+            if !unmounted {
+                let _ = Command::new("/usr/bin/hdiutil")
+                    .arg("detach")
+                    .arg(&mount)
+                    .output();
+            }
+            assert!(result.is_ok(), "eject failed: {result:?}");
+            assert!(unmounted, "eject reported success but disk stayed mounted");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn eject_validation_rejects_startup_disk_and_subdirectories() {
+        let root = TestDir::new();
+        let requested = std::fs::canonicalize(&root.0).unwrap();
+        let mut fields = plist::Dictionary::new();
+        fields.insert("MountPoint".into(), plist::Value::String("/".into()));
+        fields.insert("Ejectable".into(), plist::Value::Boolean(true));
+        let info = plist::Value::Dictionary(fields);
+        assert!(validated_eject_mount(Path::new("/"), &info).is_err());
+        assert!(validated_eject_mount(&requested, &info).is_err());
+    }
+
+    #[test]
+    fn resolves_cli_paths_before_releasing_launch_directory() {
+        let root = TestDir::new();
+        let folder = root.0.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(
+            parse_path_arg(&["scope".into(), "folder".into()], &root.0),
+            Some(
+                std::fs::canonicalize(folder)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
     }
 

@@ -2,7 +2,7 @@
 // (enabled with `withGlobalTauri` in tauri.conf.json).
 
 const { invoke, convertFileSrc, Channel } = window.__TAURI__.core;
-const { getCurrentWebview } = window.__TAURI__.webview;
+const { getCurrentWebview, getAllWebviews } = window.__TAURI__.webview;
 const { emit, listen } = window.__TAURI__.event;
 const currentWebview = getCurrentWebview();
 
@@ -12,7 +12,7 @@ const currentWebview = getCurrentWebview();
 
 function fmtBytes(n) {
   if (n === 0 || n == null) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   const v = n / Math.pow(1024, i);
   return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
@@ -462,6 +462,32 @@ function addSidebarLocation(parent, { name, path, ico = "drive", title = path, e
 
 const ejectingVolumes = new Set();
 
+function pathOnVolume(path, volume) {
+  return path === volume || path?.startsWith(`${volume}/`);
+}
+
+async function prepareWindowsForEject(path) {
+  const pending = new Set((await getAllWebviews()).map((view) => view.label));
+  const requestId = crypto.randomUUID();
+  let resolveReady, rejectReady;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const unlisten = await listen("scope://volume-eject-ready", ({ payload }) => {
+    if (payload.requestId !== requestId) return;
+    if (payload.error) rejectReady(new Error(payload.error));
+    pending.delete(payload.sender);
+    if (!pending.size) resolveReady();
+  });
+  const timer = setTimeout(() => rejectReady(new Error("A Scope window did not release the drive. Try again after it finishes loading.")), 5000);
+  try {
+    await emit("scope://prepare-volume-eject", { path, requestId });
+    if (!pending.size) resolveReady();
+    await ready;
+  } finally {
+    clearTimeout(timer);
+    unlisten();
+  }
+}
+
 async function ejectVolume(volume, button) {
   if (ejectingVolumes.has(volume.path)) return;
   ejectingVolumes.add(volume.path);
@@ -470,7 +496,9 @@ async function ejectVolume(volume, button) {
   button.innerHTML = svg("spinner");
   finderStatus.textContent = `Ejecting ${volume.name}…`;
   try {
+    await prepareWindowsForEject(volume.path);
     await invoke("eject_volume", { path: volume.path });
+    await emit("scope://volume-ejected", { path: volume.path, sender: currentWebview.label });
     if (currentDir === volume.path || currentDir?.startsWith(`${volume.path}/`)) {
       await navigate(HOME);
     }
@@ -826,7 +854,7 @@ function queueFolderSizesAfterPaint(paths, renderedDir) {
   if (!paths.length) return;
   requestAnimationFrame(() => {
     const run = () => {
-      if (currentDir !== renderedDir || viewMode !== "list") return;
+      if (currentDir !== renderedDir) return;
       paths.forEach(maybeQueueFolderSize);
     };
     if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 400 });
@@ -844,10 +872,15 @@ function pumpSizes() {
         // Keep the entry's size in sync so sorting by Size uses the real total.
         const ent = currentEntries.find((e) => e.path === path);
         if (ent) ent.size = bytes;
+        for (const col of columns) {
+          const entry = col.listing.entries.find((e) => e.path === path);
+          if (entry) entry.size = bytes;
+        }
         updateSizeCell(path, fmtBytes(bytes));
         // If the list is sorted by size, the newly-known total changes the
         // order — re-sort (debounced) once these stream in.
         if (sortKey === "size" && viewMode === "list") scheduleSizeResort();
+        if (sortKey === "size" && viewMode === "columns") renderColumns();
       })
       .catch(() => {
         folderSizeCache.set(path, null);
@@ -864,6 +897,11 @@ function updateSizeCell(path, text) {
   const row = fileRows.querySelector(`tr[data-path="${CSS.escape(path)}"]`);
   const cell = row && row.querySelector("td.size");
   if (cell) cell.textContent = text;
+  if (selectedPaths.size > 1) showMultiPreview();
+  else if (selectedPath === path) {
+    const previewSize = document.getElementById("pv-folder-size");
+    if (previewSize) previewSize.textContent = text;
+  }
 }
 
 // Debounced re-sort while folder sizes stream in (only when sorting by Size).
@@ -1069,7 +1107,7 @@ function showMultiPreview() {
   previewEl.innerHTML = `
     <div class="pv-bigicon">🗂️</div>
     <div class="pv-name">${sel.length} items selected</div>
-    <div class="pv-kind">${fmtBytes(total)}${approx ? "+" : ""}</div>`;
+    <div class="pv-kind">${fmtBytes(total)}${approx ? "+" : ""} on disk</div>`;
 }
 
 function openEntry(entry) {
@@ -1299,6 +1337,14 @@ function showTransferProgress(progress, destination) {
   transferProgressEl.classList.remove("hidden", "error");
   const action = progress.operation === "copy" ? "copy" : progress.operation === "move" ? "move" : "transfer";
   const gerund = progress.operation === "copy" ? "Copying" : progress.operation === "move" ? "Moving" : "Transferring";
+  if (progress.phase === "authorizing") {
+    transferLabelEl.textContent = `${gerund} with Finder…`;
+    transferTrackEl.classList.add("indeterminate");
+    transferTrackEl.removeAttribute("aria-valuenow");
+    transferFillEl.style.width = "";
+    transferDetailEl.textContent = "Approve any macOS permission prompt. Finder will show transfer progress.";
+    return;
+  }
   transferLabelEl.textContent =
     progress.phase === "scanning"
       ? `Preparing to ${action} to ${pathBasename(destination)}…`
@@ -1447,6 +1493,23 @@ async function registerNativeFileDrops() {
 
 async function registerTransferRefresh() {
   try {
+    await listen("scope://prepare-volume-eject", async ({ payload }) => {
+      let error = null;
+      if (transferInProgress) {
+        error = "Wait for the file transfer in Scope to finish before ejecting.";
+      } else if (pathOnVolume(selectedPath, payload.path)) {
+        selectedPath = null;
+        selectedEntry = null;
+        selectedPaths.clear();
+        clearPreview();
+      }
+      await emit("scope://volume-eject-ready", { requestId: payload.requestId, sender: currentWebview.label, error });
+    });
+    await listen("scope://volume-ejected", async ({ payload }) => {
+      if (payload.sender === currentWebview.label) return;
+      if (pathOnVolume(currentDir, payload.path)) await navigate(HOME);
+      await refreshVolumes();
+    });
     await listen("scope://files-transferred", (event) => {
       const payload = event.payload || {};
       if (payload.sender === currentWebview.label) return;
@@ -1470,6 +1533,17 @@ function openItemMenu(x, y, entry) {
     {
       label: "Reveal in Finder",
       onClick: () => invoke("reveal_in_finder", { path: entry.path }).catch((e) => (finderStatus.textContent = `⚠ ${e}`)),
+    },
+    {
+      label: multi ? "Copy Absolute Paths" : "Copy Absolute Path",
+      onClick: async () => {
+        try {
+          await invoke("copy_absolute_paths", { paths });
+          finderStatus.textContent = multi ? `Copied ${paths.length} absolute paths` : "Copied absolute path";
+        } catch (error) {
+          finderStatus.textContent = `⚠ Could not copy path: ${error}`;
+        }
+      },
     },
     { type: "sep" },
     { label: multi ? `Move ${paths.length} Items to Trash` : "Move to Trash", onClick: () => trashPaths(paths) },
@@ -1524,7 +1598,14 @@ function renderColumns() {
   columns.forEach((col, idx) => {
     const colEl = document.createElement("div");
     colEl.className = "mcol";
+    for (const entry of col.listing.entries) {
+      const cached = folderSizeCache.get(entry.path);
+      if (entry.is_dir && typeof cached === "number") entry.size = cached;
+    }
     const list = filterEntries(col.listing.entries).sort(compareEntries);
+    if (calcFolderSizes) {
+      queueFolderSizesAfterPaint(list.filter((entry) => entry.is_dir).map((entry) => entry.path), currentDir);
+    }
     for (const e of list) {
       const item = document.createElement("div");
       item.className = "mcol-item" + (e.hidden ? " row-hidden" : "") + (e.path === col.selectedPath ? " selected" : "");
@@ -1574,6 +1655,7 @@ async function columnSelect(colIndex, entry) {
   columns[colIndex].selectedPath = entry.path;
   selectedPath = entry.path;
   selectedEntry = entry;
+  selectedPaths = new Set([entry.path]);
 
   if (entry.is_dir && entry.kind !== "Application") {
     try {
@@ -1593,6 +1675,12 @@ async function columnSelect(colIndex, entry) {
 // ---- Preview pane ----
 
 function clearPreview() {
+  for (const media of previewEl.querySelectorAll("audio, video")) {
+    media.pause();
+    media.removeAttribute("src");
+    media.load();
+  }
+  for (const frame of previewEl.querySelectorAll("iframe")) frame.src = "about:blank";
   previewEl.innerHTML = '<div class="preview-empty">Select an item to preview</div>';
 }
 
@@ -1643,6 +1731,10 @@ async function showPreview(entry) {
     media = `<audio class="pv-media" controls src="${convertFileSrc(entry.path)}"></audio>`;
   } else if (!entry.is_dir && e === "pdf") {
     media = `<iframe class="pv-media" style="height:300px" src="${convertFileSrc(entry.path)}"></iframe>`;
+  } else if (!entry.is_dir && ["raw", "qcow2", "vmdk", "vdi", "vhd", "vhdx"].includes(e)) {
+    // Virtual disks can have enormous logical capacities. Show their metadata
+    // immediately instead of waiting for a text/QuickLook preview of the disk.
+    media = `<div class="pv-bigicon">${iconFor(entry)}</div>`;
   } else if (!entry.is_dir) {
     // Try a text preview; fall back to a QuickLook thumbnail, then an icon.
     try {
@@ -1663,8 +1755,14 @@ async function showPreview(entry) {
 
   const rows = [];
   rows.push(["Kind", info.kind]);
-  if (info.is_dir) rows.push(["Items", info.item_count != null ? info.item_count : "—"]);
-  else rows.push(["Size", fmtBytes(info.size)]);
+  if (info.is_dir) {
+    rows.push(["Items", info.item_count != null ? info.item_count : "—"]);
+    rows.push(["Size on disk", sizeCellText(entry)]);
+  }
+  else {
+    rows.push(["Size on disk", fmtBytes(info.size)]);
+    rows.push(["Logical size", fmtBytes(info.logical_size)]);
+  }
   rows.push(["Created", fmtDate(info.created)]);
   rows.push(["Modified", fmtDate(info.modified)]);
   rows.push(["Accessed", fmtDate(info.accessed)]);
@@ -1677,7 +1775,7 @@ async function showPreview(entry) {
     <div class="pv-kind">${info.kind}</div>
     <div class="pv-info">
       ${rows
-        .map(([k, v]) => `<div class="kv"><span>${k}</span><span title="${escapeHtml(String(v))}">${escapeHtml(String(v))}</span></div>`)
+        .map(([k, v]) => `<div class="kv"><span>${k}</span><span ${info.is_dir && k === "Size on disk" ? 'id="pv-folder-size"' : ""} title="${escapeHtml(String(v))}">${escapeHtml(String(v))}</span></div>`)
         .join("")}
     </div>
     <div class="pv-actions">
@@ -1686,6 +1784,7 @@ async function showPreview(entry) {
     </div>`;
   document.getElementById("pv-open").addEventListener("click", () => openEntry(entry));
   document.getElementById("pv-reveal").addEventListener("click", () => invoke("reveal_in_finder", { path: entry.path }));
+  if (info.is_dir && calcFolderSizes) maybeQueueFolderSize(entry.path);
 }
 
 // ---- View mode toggle ----
@@ -1844,7 +1943,7 @@ volumeAccessIconEl.innerHTML = svg("drive");
 
 const SORT_FIELDS = [
   { key: "name", label: "Name" },
-  { key: "size", label: "Size" },
+  { key: "size", label: "Size on disk" },
   { key: "kind", label: "Kind" },
   { key: "modified", label: "Date Modified" },
   { key: "created", label: "Date Created" },
@@ -2038,6 +2137,7 @@ listViewEl.querySelector("thead").addEventListener("contextmenu", (e) => {
 
 // Right-click anywhere in the column view: Sort By + folders-on-top.
 columnViewEl.addEventListener("contextmenu", (e) => {
+  if (e.target.closest(".mcol-item")) return;
   e.preventDefault();
   openMenu(e.clientX, e.clientY, [
     ...sortMenuItems(),
