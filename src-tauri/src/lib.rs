@@ -11,7 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -29,6 +29,10 @@ struct AppState {
     // Every Finder window gets its own CLI-provided starting directory.
     initial_paths: Mutex<HashMap<String, String>>,
 }
+
+// Eject cancels scans and waits for their directory handles to be dropped.
+static SIZE_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
+static SIZE_SCAN_LOCK: RwLock<()> = RwLock::new(());
 
 static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -913,9 +917,15 @@ fn finder_transfer(_items: &[PlannedTransfer]) -> Result<Vec<PathBuf>, String> {
 /// double-counting. Runs on a blocking thread since it walks the whole subtree.
 #[tauri::command]
 async fn dir_size(path: String) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || dir_size_walk(Path::new(&path)))
-        .await
-        .map_err(|e| e.to_string())
+    let generation = SIZE_SCAN_GENERATION.load(Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _scan = SIZE_SCAN_LOCK.read().map_err(|e| e.to_string())?;
+        dir_size_walk_cancellable(Path::new(&path), || {
+            SIZE_SCAN_GENERATION.load(Ordering::SeqCst) != generation
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Filesystem allocation, not the logical length of sparse/compressed files.
@@ -931,30 +941,47 @@ fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
     }
 }
 
+#[cfg(test)]
 fn dir_size_walk(path: &Path) -> u64 {
-    fn walk(path: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
-        let Ok(metadata) = std::fs::symlink_metadata(path) else {
-            return 0;
+    dir_size_walk_cancellable(path, || false).unwrap()
+}
+
+fn dir_size_walk_cancellable(path: &Path, cancelled: impl Fn() -> bool) -> Result<u64, String> {
+    let mut pending = vec![path.to_path_buf()];
+    #[cfg(unix)]
+    let mut seen = HashSet::new();
+    let mut total = 0u64;
+    while let Some(path) = pending.pop() {
+        if cancelled() {
+            return Err("Folder size scan cancelled for eject".to_string());
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
         };
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             // Count hard-linked files once, like du, and never follow symlinks.
             if !seen.insert((metadata.dev(), metadata.ino())) {
-                return 0;
+                continue;
             }
         }
-        let mut total = allocated_size(&metadata);
+        total = total.saturating_add(allocated_size(&metadata));
         if metadata.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(path) {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                // Drop the iterator (and its open directory handle) before
+                // visiting children. Recursive iteration pins every ancestor
+                // on an external drive for the entire scan, preventing eject.
                 for entry in entries.flatten() {
-                    total = total.saturating_add(walk(&entry.path(), seen));
+                    if cancelled() {
+                        return Err("Folder size scan cancelled for eject".to_string());
+                    }
+                    pending.push(entry.path());
                 }
             }
         }
-        total
     }
-    walk(path, &mut HashSet::new())
+    Ok(total)
 }
 
 fn open_with(args: &[&str]) -> Result<(), String> {
@@ -1029,6 +1056,8 @@ async fn eject_volume(path: String) -> Result<(), String> {
 }
 
 fn eject_volume_blocking(path: &str) -> Result<(), String> {
+    SIZE_SCAN_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let _scans = SIZE_SCAN_LOCK.write().map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
     {
         let requested = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
@@ -1701,6 +1730,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_scan_cancellation_does_not_return_a_partial_size() {
+        let root = TestDir::new();
+        std::fs::create_dir(root.0.join("child")).unwrap();
+        std::fs::write(root.0.join("child/file"), b"test").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let result = dir_size_walk_cancellable(&root.0, || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        });
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert!(dir_size_walk(&root.0) > 0);
+    }
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
 

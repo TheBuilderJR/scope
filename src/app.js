@@ -238,6 +238,7 @@ const finderSearch = document.getElementById("finder-search");
 const listViewEl = document.getElementById("list-view");
 const columnViewEl = document.getElementById("column-view");
 const previewEl = document.getElementById("preview");
+const togglePreviewEl = document.getElementById("toggle-preview");
 const finderBodyEl = document.querySelector(".finder-body");
 const sidebarEl = document.querySelector(".sidebar");
 const sidebarResizerEl = document.getElementById("sidebar-resizer");
@@ -285,6 +286,8 @@ let mcolWidth = loadPref("scope.mcolWidth", 230); // Miller column width (px)
 let calcFolderSizes = loadPref("scope.calcFolderSizes", true); // recursive folder sizes
 let sidebarWidth = loadPref("scope.sidebarWidth", 190);
 let sidebarVisible = loadPref("scope.sidebarVisible", true);
+let previewVisible = loadPref("scope.previewVisible", true);
+let previewGeneration = 0;
 
 function loadPref(key, fallback) {
   try {
@@ -362,6 +365,25 @@ sidebarResizerEl.addEventListener("dblclick", () => {
   applySidebarState();
 });
 applySidebarState(false);
+
+function applyPreviewState() {
+  previewEl.classList.toggle("hidden", !previewVisible);
+  togglePreviewEl.setAttribute("aria-expanded", String(previewVisible));
+  togglePreviewEl.setAttribute("aria-label", previewVisible ? "Hide Preview" : "Show Preview");
+  togglePreviewEl.title = `${previewVisible ? "Hide" : "Show"} Preview (⌥⌘P)`;
+  togglePreviewEl.textContent = previewVisible ? "Hide Preview" : "Show Preview";
+}
+
+function togglePreview() {
+  previewVisible = !previewVisible;
+  savePref("scope.previewVisible", previewVisible);
+  applyPreviewState();
+  if (previewVisible) updateSelectionPreview();
+  else clearPreview();
+}
+
+togglePreviewEl.addEventListener("click", togglePreview);
+applyPreviewState();
 
 function setAppZoom(value, persist = true) {
   const numeric = Number(value);
@@ -1092,6 +1114,8 @@ function updateSelectionPreview() {
 
 // Summary preview for a multi-selection: count + combined size.
 function showMultiPreview() {
+  clearPreview();
+  if (!previewVisible) return;
   const sel = currentEntries.filter((e) => selectedPaths.has(e.path));
   let total = 0;
   let approx = false;
@@ -1497,11 +1521,23 @@ async function registerTransferRefresh() {
       let error = null;
       if (transferInProgress) {
         error = "Wait for the file transfer in Scope to finish before ejecting.";
-      } else if (pathOnVolume(selectedPath, payload.path)) {
-        selectedPath = null;
-        selectedEntry = null;
-        selectedPaths.clear();
-        clearPreview();
+      } else {
+        // Discard queued scans before the backend cancels active scans.
+        for (let i = sizeWaiting.length - 1; i >= 0; i--) {
+          if (pathOnVolume(sizeWaiting[i], payload.path)) {
+            folderSizeCache.delete(sizeWaiting[i]);
+            sizeWaiting.splice(i, 1);
+          }
+        }
+        if (pathOnVolume(selectedPath, payload.path)) {
+          selectedPath = null;
+          selectedEntry = null;
+          selectedPaths.clear();
+          clearPreview();
+        }
+        if (pathOnVolume(currentDir, payload.path)) {
+          try { await navigate(HOME); } catch (e) { error = String(e); }
+        }
       }
       await emit("scope://volume-eject-ready", { requestId: payload.requestId, sender: currentWebview.label, error });
     });
@@ -1675,6 +1711,7 @@ async function columnSelect(colIndex, entry) {
 // ---- Preview pane ----
 
 function clearPreview() {
+  previewGeneration++;
   for (const media of previewEl.querySelectorAll("audio, video")) {
     media.pause();
     media.removeAttribute("src");
@@ -1706,15 +1743,20 @@ async function bigThumb(entry) {
 }
 
 async function showPreview(entry) {
+  clearPreview();
+  if (!previewVisible) return;
+  const generation = previewGeneration;
+  const isCurrent = () => previewVisible && generation === previewGeneration && selectedPath === entry.path;
   let info;
   try {
     info = await invoke("stat_path", { path: entry.path });
   } catch (e) {
+    if (!isCurrent()) return;
     previewEl.innerHTML = `<div class="preview-empty">⚠ ${escapeHtml(String(e))}</div>`;
     return;
   }
   // Guard against races: only render if this is still the selected item.
-  if (selectedPath !== entry.path) return;
+  if (!isCurrent()) return;
 
   const e = ext(entry.path);
   let media = "";
@@ -1726,7 +1768,7 @@ async function showPreview(entry) {
     // decodes every codec, while the webview's <video> only plays some (mp4
     // codecs vary, mkv/avi don't play at all), giving inconsistent previews.
     media = await bigThumb(entry);
-    if (selectedPath !== entry.path) return;
+    if (!isCurrent()) return;
   } else if (!entry.is_dir && AUD.includes(e)) {
     media = `<audio class="pv-media" controls src="${convertFileSrc(entry.path)}"></audio>`;
   } else if (!entry.is_dir && e === "pdf") {
@@ -1739,16 +1781,17 @@ async function showPreview(entry) {
     // Try a text preview; fall back to a QuickLook thumbnail, then an icon.
     try {
       const tp = await invoke("read_text_preview", { path: entry.path });
-      if (selectedPath !== entry.path) return;
+      if (!isCurrent()) return;
       if (tp.is_text) {
         media = `<pre class="pv-text">${escapeHtml(tp.text)}${tp.truncated ? "\n…" : ""}</pre>`;
       } else {
         media = await bigThumb(entry);
       }
     } catch {
+      if (!isCurrent()) return;
       media = await bigThumb(entry);
     }
-    if (selectedPath !== entry.path) return;
+    if (!isCurrent()) return;
   } else {
     media = `<div class="pv-bigicon">${iconFor(entry)}</div>`;
   }
@@ -1841,6 +1884,11 @@ document.getElementById("nav-home").addEventListener("click", () => navigate(HOM
 finderSearch.addEventListener("input", () => (viewMode === "columns" ? renderColumns() : renderFiles()));
 
 document.addEventListener("keydown", (ev) => {
+  if (activeView === "finder" && ev.metaKey && ev.altKey && !ev.ctrlKey && ev.code === "KeyP") {
+    ev.preventDefault();
+    togglePreview();
+    return;
+  }
   if (activeView === "finder" && ev.metaKey && ev.altKey && !ev.ctrlKey && ev.code === "KeyS") {
     ev.preventDefault();
     toggleSidebar();

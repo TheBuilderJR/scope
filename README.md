@@ -19,7 +19,8 @@ A clean, native-feeling **light theme** styled after macOS Finder.
   and cached on disk.
 - A **preview / info pane** with live previews of images, video, audio, PDFs,
   and text/source files, plus full metadata (size, kind, created / modified /
-  accessed dates, permissions, path).
+  accessed dates, permissions, path). Collapse or restore it with **Show/Hide
+  Preview** or **⌥⌘P**; Scope remembers the setting.
 - Sidebar of favorites and mounted volumes with custom icons.
 - Clickable breadcrumb path, plus Back / Forward / Up / Home navigation.
 - Arrow-key row and folder navigation, including Shift-range selection.
@@ -41,7 +42,8 @@ A clean, native-feeling **light theme** styled after macOS Finder.
   are never replaced by the Finder retry; Finder may report a name conflict.
 - Safe eject releases media previews in all Scope windows, checks the macOS
   mount information, and uses Finder if the standard eject needs assistance.
-  Active Scope transfers block eject; successful eject refreshes every window.
+  Background folder-size scans are cancelled before eject and preview changes
+  release loaded media. Active Scope transfers block eject; successful eject refreshes every window.
 
 ### 📊 Monitor (htop-like, all in one view)
 - Live **time-series graphs** for CPU, memory, and network throughput
@@ -86,6 +88,7 @@ step**.
 The signed macOS bundle includes Apple's [Apple Events entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events)
 and an Automation usage description for permission-assisted Finder transfers.
 
+Run preview lifecycle tests with `node --test tests/preview.test.cjs`.
 Run backend tests with `cargo test --manifest-path src-tauri/Cargo.toml`.
 The optional Finder integration test launches Finder and uses temporary files:
 `cargo test --manifest-path src-tauri/Cargo.toml finder_transfer_copies_and_moves_literal_filenames_without_overwriting -- --ignored`.
